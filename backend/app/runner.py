@@ -24,6 +24,76 @@ def parse_json_loose(text: str) -> dict[str, Any]:
     return {"summary": text[:500], "steps": [], "likely_files": [], "include_test_scout": True, "include_security_review": False, "risks": ["Planner output was not valid JSON; using conservative default routing."]}
 
 
+def is_test_or_meta_file(path: str) -> bool:
+    """Determine whether a file path represents a test, cache, virtualenv, or harness artifact."""
+    p = path.replace("\\", "/").lower().strip()
+    meta_artifacts = (
+        ".test_last_result.json",
+        ".venv",
+        "evaluation.json",
+        "__pycache__",
+        ".pytest_cache",
+        ".git",
+        ".gitignore",
+        "models/",
+        ".pkl",
+    )
+    if any(m in p for m in meta_artifacts):
+        return True
+
+    parts = p.split("/")
+    filename = parts[-1]
+
+    # Test directories
+    if any(part in {"tests", "test", "spec", "specs", "__tests__"} for part in parts[:-1]):
+        return True
+
+    # Test filename conventions
+    if (
+        filename.startswith("test_")
+        or filename.endswith("_test.py")
+        or filename.endswith(".test.js")
+        or filename.endswith(".test.ts")
+        or filename.endswith(".test.jsx")
+        or filename.endswith(".test.tsx")
+        or filename.endswith(".spec.js")
+        or filename.endswith(".spec.ts")
+        or filename.endswith("test.py")
+    ):
+        return True
+
+    return False
+
+
+def classify_changed_files(files: list[str]) -> tuple[list[str], list[str]]:
+    """Classify modified files into (production_files, test_or_meta_files)."""
+    prod_files: list[str] = []
+    test_or_meta: list[str] = []
+    for f in files:
+        if is_test_or_meta_file(f):
+            test_or_meta.append(f)
+        else:
+            prod_files.append(f)
+    return prod_files, test_or_meta
+
+
+def is_implementation_task(task: str, plan: dict[str, Any] | None = None) -> bool:
+    """Check if the task requires modifying production code rather than test-only or doc-only work."""
+    task_lower = task.lower()
+    implementation_keywords = (
+        "fix", "bug", "implement", "feature", "issue", "defect", "error",
+        "correct", "solve", "patch", "repair", "resolve", "refactor"
+    )
+    if any(kw in task_lower for kw in implementation_keywords):
+        return True
+    if plan:
+        likely = plan.get("likely_files") or []
+        prod, _ = classify_changed_files(likely)
+        if prod:
+            return True
+    return False
+
+
 def parse_reviewer_verdict(text: str) -> dict[str, Any]:
     """Parse structured verdict and rejection reasons from Code Reviewer output."""
     if not text or not text.strip():
@@ -181,10 +251,13 @@ def compute_verification_state(
     dependency_status: str | None = None,
     dependency_error: str | None = None,
     baseline_tests: list[dict[str, Any]] | None = None,
+    implementation_status: str | None = None,
+    failure_to_pass_verified: bool | None = None,
+    reproduced_on_baseline: bool | None = None,
 ) -> tuple[str, bool, bool, str | None, dict[str, Any]]:
     """
     Compute explicit verification state across dependency preparation, baseline comparison,
-    test execution, and code review:
+    test execution, task implementation evidence, and code review:
       Tests: PASS, FAIL, NO_TESTS, BLOCKED, INCONCLUSIVE
       Code Review: APPROVED, REJECTED, PENDING, BLOCKED, INCONCLUSIVE
       Overall: PASS, PARTIAL, FAIL, BLOCKED, INCONCLUSIVE
@@ -194,6 +267,21 @@ def compute_verification_state(
     review_approved = review_details["approved"]
     review_state = review_details.get("review_state", "REJECTED" if not review_approved else "APPROVED")
     rejection_reasons = review_details.get("rejection_reasons", [])
+
+    # If change-evidence validation detected that no production files were modified for an implementation task,
+    # the task was not implemented and cannot pass verification.
+    if implementation_status == "NOT_IMPLEMENTED":
+        review_approved = False
+        review_state = "REJECTED"
+        rejection_msg = "No production code changes were made; only test or metadata files were modified."
+        if rejection_msg not in rejection_reasons:
+            rejection_reasons.append(rejection_msg)
+        review_details.update({
+            "approved": False,
+            "review_state": "REJECTED",
+            "verdict": "NEEDS_CHANGES",
+            "rejection_reasons": rejection_reasons,
+        })
 
     if dependency_status in {"DEPENDENCY_INSTALL_FAILED", "DEPENDENCY_INSTALL_BLOCKED"}:
         review_details.update({
@@ -266,10 +354,14 @@ def compute_verification_state(
         "pre_existing_failures": pre_existing,
         "new_failures": new_failures,
         "resolved_failures": resolved,
+        "failure_to_pass_verified": bool(failure_to_pass_verified),
+        "reproduced_on_baseline": bool(reproduced_on_baseline),
     }
 
     # Regression status
-    if new_failures:
+    if implementation_status == "NOT_IMPLEMENTED":
+        regression_status = "NOT_IMPLEMENTED"
+    elif new_failures:
         regression_status = "REGRESSION_DETECTED"
     elif pre_existing and not test_passed:
         if review_state == "APPROVED" and not new_failures:
@@ -429,23 +521,103 @@ class RunManager:
                 f"COORDINATOR PLAN:\n{json.dumps(plan)}\n\n"
                 f"REPOSITORY ANALYSIS:\n{analyst['output'][:2500]}\n\n"
                 f"TEST DISCOVERY & RECOMMENDATIONS:\n{test_discovery[:2500]}\n\n"
-                f"WORKSPACE TEST STATUS:\n{json.dumps(repo_test_info, indent=2)}\n"
-                "CRITICAL: If the repository has NO tests or tests for this bug are missing, you MUST create a meaningful regression test file."
+                f"WORKSPACE TEST STATUS:\n{json.dumps(repo_test_info, indent=2)}\n\n"
+                "CRITICAL MANDATORY INSTRUCTIONS:\n"
+                "1. For bug-fixing or implementation tasks, you MUST use write_file to modify the actual production code file(s) (e.g. in app/ or src/).\n"
+                "   Submitting a test-only change or reporting a bug fix without modifying production code is STRICTLY PROHIBITED and will cause task rejection.\n"
+                "2. Order of operations: first modify production code, then add or update meaningful regression tests in tests/ (e.g. tests/test_*.py).\n"
+                "3. Ensure tests specifically verify the defect fix against domain/market invariants and would fail on unpatched code."
             )
 
             coder = await executor.run("coding_agent", row["task"], context=coding_context, max_steps=max_steps)
             agent_outputs[coder["role"]] = coder["output"]
-            self.event(run_id, "implementation_ready", "Coding agent finished its implementation pass", {"summary": coder["output"][:2000]}, "coding_agent")
+
+            # Step 3b: Change-evidence validation & Bounded repair attempt
+            needs_prod = is_implementation_task(row["task"], plan)
+            changed_files = await self._changed_files(workspace)
+            prod_files, test_meta_files = classify_changed_files(changed_files)
+
+            max_repairs = 1
+            repair_attempt = 0
+            while needs_prod and len(prod_files) == 0 and repair_attempt < max_repairs:
+                repair_attempt += 1
+                likely_files = plan.get("likely_files") or []
+                likely_prod, _ = classify_changed_files(likely_files)
+                target_hint = ", ".join(likely_prod) if likely_prod else "the relevant source file in app/ or src/ (e.g. app/ml_service.py)"
+
+                self.event(
+                    run_id,
+                    "implementation_deficiency_detected",
+                    f"Coding agent did not modify any production code files (attempt {repair_attempt}/{max_repairs})",
+                    {"changed_files": changed_files, "test_meta_files": test_meta_files, "target_hint": target_hint},
+                    "coding_agent"
+                )
+
+                repair_context = (
+                    f"CRITICAL IMPLEMENTATION DEFICIENCY DETECTED:\n"
+                    f"Your git diff shows that ZERO production code files were modified on disk.\n"
+                    f"You only created or modified test/metadata files: {', '.join(test_meta_files) or '(none)'}.\n"
+                    f"The task requires fixing a bug in the production application code: {row['task']}.\n"
+                    f"Coordinator identified likely files: {target_hint}.\n\n"
+                    f"MANDATORY ACTION REQUIRED:\n"
+                    f"1. You MUST call write_file to edit the production code file ({target_hint}) to implement the actual fix.\n"
+                    f"2. Do NOT simply describe a fix or only add tests. You MUST call write_file on the production file.\n"
+                    f"Use write_file now to update the production code."
+                )
+
+                coder_repair = await executor.run(
+                    "coding_agent",
+                    row["task"],
+                    context=repair_context,
+                    max_steps=min(max_steps, 6)
+                )
+                coder["output"] += f"\n\n--- REPAIR ATTEMPT {repair_attempt} ---\n" + coder_repair["output"]
+                agent_outputs["coding_agent"] = coder["output"]
+
+                changed_files = await self._changed_files(workspace)
+                prod_files, test_meta_files = classify_changed_files(changed_files)
+                if prod_files:
+                    self.event(
+                        run_id,
+                        "implementation_repair_succeeded",
+                        f"Coding agent successfully modified production code ({', '.join(prod_files)})",
+                        {"prod_files": prod_files},
+                        "coding_agent"
+                    )
+                    break
+
+            if needs_prod and len(prod_files) == 0:
+                implementation_status = "NOT_IMPLEMENTED"
+                self.event(
+                    run_id,
+                    "implementation_repair_exhausted",
+                    "Coding agent failed to modify production files after repair attempts",
+                    {"changed_files": changed_files},
+                    "coding_agent"
+                )
+            else:
+                implementation_status = "IMPLEMENTED"
+
+            self.event(
+                run_id,
+                "implementation_ready",
+                f"Coding agent finished (status: {implementation_status})",
+                {"status": implementation_status, "prod_files": prod_files, "test_files": test_meta_files, "summary": coder["output"][:2000]},
+                "coding_agent"
+            )
 
             # Step 4: Test & Debug Agent
             diff_after_coder = await runtime.execute("git_diff", {})
             tester_context = (
                 f"TASK:\n{row['task']}\n\n"
+                f"IMPLEMENTATION STATUS: {implementation_status}\n"
+                f"MODIFIED PRODUCTION FILES: {', '.join(prod_files) or 'NONE'}\n"
+                f"MODIFIED TEST FILES: {', '.join(test_meta_files) or 'NONE'}\n\n"
                 f"TEST DISCOVERY:\n{test_discovery[:2500]}\n\n"
                 f"IMPLEMENTATION REPORT:\n{coder['output'][:2500]}\n\n"
                 f"GIT DIFF:\n{diff_after_coder[:3000]}\n\n"
                 f"CONFIGURED TEST COMMAND: {row['test_command']}\n"
-                "Run tests using run_tests. If pytest reports exit code 5 (no tests collected) or missing tests, locate or fix the test files."
+                "Run tests using run_tests. Check whether tests exercise the production fix. If tests fail or are missing, diagnose and fix them using write_file."
             )
 
             tester = await executor.run("test_debug_agent", row["task"], context=tester_context, max_steps=max_steps)
@@ -454,6 +626,69 @@ class RunManager:
             # Fallback test run if test_debug_agent did not run any test tool
             if not runtime.test_results:
                 self.event(run_id, "verification_fallback", "Test agent did not execute tests; running configured verification command", {"test_command": row["test_command"]}, "test_debug_agent")
+                await runtime.execute("run_tests", {"command": "auto"})
+
+            # Failure-to-pass (RED-to-GREEN) verification:
+            reproduced_on_baseline = False
+            failure_to_pass_verified = False
+            baseline_regression_details: list[str] = []
+
+            # Re-evaluate changed files after test_debug_agent
+            changed_files = await self._changed_files(workspace)
+            prod_files, test_meta_files = classify_changed_files(changed_files)
+            test_files = [f for f in test_meta_files if any(ext in f for ext in (".py", ".js", ".ts", ".jsx", ".tsx")) and "test" in f.lower()]
+
+            if prod_files and test_files:
+                saved_prod: dict[str, str] = {}
+                for pf in prod_files:
+                    p_path = workspace / pf
+                    if p_path.is_file():
+                        try:
+                            saved_prod[pf] = p_path.read_text(encoding="utf-8")
+                        except Exception:
+                            pass
+
+                if saved_prod:
+                    try:
+                        proc = await asyncio.create_subprocess_exec(
+                            "git", "checkout", "HEAD", "--", *list(saved_prod.keys()),
+                            cwd=workspace, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                        )
+                        await proc.communicate()
+
+                        repro_record = await runtime.run_test_command(
+                            runtime._detect_test_command() or ["python", "-m", "pytest", "-q"],
+                            timeout=min(self.settings.agentharness_test_timeout_seconds, 30)
+                        )
+                        if repro_record.get("outcome") == "FAIL":
+                            reproduced_on_baseline = True
+                            failure_to_pass_verified = True
+                            baseline_regression_details = repro_record.get("failure_details", [])
+                            self.event(
+                                run_id,
+                                "failure_to_pass_verified",
+                                f"Verified: Regression tests correctly fail on unpatched baseline code ({len(baseline_regression_details)} failures)",
+                                {"failure_details": baseline_regression_details}
+                            )
+                        else:
+                            self.event(
+                                run_id,
+                                "failure_to_pass_unverified",
+                                "Tests passed on unpatched baseline code (they may verify existing behavior only)",
+                                {"outcome": repro_record.get("outcome")}
+                            )
+                    except Exception:
+                        pass
+                    finally:
+                        # Restore production file contents unconditionally
+                        for pf, content in saved_prod.items():
+                            try:
+                                (workspace / pf).write_text(content, encoding="utf-8")
+                            except Exception:
+                                pass
+
+            # Re-run tests on restored patched code if failure-to-pass check ran
+            if failure_to_pass_verified:
                 await runtime.execute("run_tests", {"command": "auto"})
 
             # Structured test summary for Code Reviewer
@@ -483,22 +718,27 @@ class RunManager:
                 f"Failures: {', '.join(baseline_record.get('failure_details', [])) or 'None'}"
             ) if baseline_tests else "No baseline test executed."
 
-            changed_files = await self._changed_files(workspace)
             changed_files_summary = "\n".join(f"- {f}" for f in changed_files) or "No files changed."
 
             # Step 5: Code Reviewer
             review_context = (
                 f"ORIGINAL TASK / BUG DESCRIPTION:\n{row['task']}\n\n"
                 f"COORDINATOR PLAN:\n{json.dumps(plan)}\n\n"
+                f"IMPLEMENTATION STATUS: {implementation_status}\n"
+                f"MODIFIED PRODUCTION FILES: {', '.join(prod_files) or 'NONE (NO PRODUCTION CODE WAS MODIFIED)'}\n"
+                f"MODIFIED TEST / METADATA FILES: {', '.join(test_meta_files) or 'NONE'}\n\n"
+                f"FAILURE-TO-PASS REGRESSION EVIDENCE:\n"
+                f"{'VERIFIED: New regression tests failed on unpatched baseline code and pass on patched code.' if reproduced_on_baseline else 'NOTE: Tests were not verified to fail on unpatched baseline code (they may verify existing behavior only).'}\n\n"
                 f"IMPLEMENTATION SUMMARY:\n{coder['output'][:2000]}\n\n"
                 f"BASELINE TESTS (BEFORE AGENT CHANGES):\n{baseline_summary}\n\n"
                 f"AFTER-STATE TEST EXECUTION EVIDENCE:\n{test_evidence_summary}\n\n"
                 f"CHANGED FILES:\n{changed_files_summary}\n\n"
                 f"GIT DIFF:\n{diff_display[:10000]}\n\n"
-                "Check bug fix against the original task problem statement.\n"
-                "Verify that tests ran, test evidence is genuine, and all tests passed.\n"
-                "If tests failed or no changes exist, reject with NEEDS_CHANGES and state rejection reasons in the structured output.\n"
-                "If changes are correct and all tests pass with verified evidence, approve with APPROVE."
+                "MANDATORY REVIEW RULES:\n"
+                "1. If the task is a bug fix or feature implementation and ZERO production files were modified, you MUST reject with NEEDS_CHANGES and state: 'No production code changes were made; only test/metadata files were modified.'\n"
+                "2. If the implementation summary claims a file was edited (e.g. app/ml_service.py) but git diff contains no changes to that file, you MUST reject with NEEDS_CHANGES.\n"
+                "3. Check that tests ran and all passed. If tests failed, reject with NEEDS_CHANGES.\n"
+                "4. If production code was fixed, tests pass, and evidence is verified, approve with APPROVE."
             )
 
             reviewer = await executor.run("code_reviewer", row["task"], context=review_context, max_steps=max_steps)
@@ -524,6 +764,9 @@ class RunManager:
                 dependency_status=dep_info.get("status"),
                 dependency_error=dep_info.get("error"),
                 baseline_tests=baseline_tests,
+                implementation_status=implementation_status,
+                failure_to_pass_verified=failure_to_pass_verified,
+                reproduced_on_baseline=reproduced_on_baseline,
             )
             success = (verification_state == "PASS")
 

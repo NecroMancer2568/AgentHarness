@@ -12,7 +12,13 @@ from app.repository import (
     parse_test_output,
     resolve_test_command,
 )
-from app.runner import compute_verification_state, parse_reviewer_verdict
+from app.runner import (
+    classify_changed_files,
+    compute_verification_state,
+    is_implementation_task,
+    is_test_or_meta_file,
+    parse_reviewer_verdict,
+)
 
 
 class VerificationPipelineTests(unittest.IsolatedAsyncioTestCase):
@@ -345,6 +351,65 @@ class VerificationPipelineTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(artifact.exists())
             data = json.loads(artifact.read_text())
             self.assertEqual(data["outcome"], "PASS")
+
+    def test_file_classification_production_vs_test(self):
+        """Production code files must be distinguished from test and metadata files."""
+        files = [
+            "app/ml_service.py",
+            "app/config.py",
+            "src/utils.js",
+            "tests/test_ml_service.py",
+            ".test_last_result.json",
+            ".venv",
+            "models/stock_predictor.pkl",
+            "app/__pycache__/ml_service.cpython-313.pyc",
+            "evaluation.json",
+        ]
+        prod_files, test_meta = classify_changed_files(files)
+        self.assertEqual(prod_files, ["app/ml_service.py", "app/config.py", "src/utils.js"])
+        self.assertIn("tests/test_ml_service.py", test_meta)
+        self.assertIn(".venv", test_meta)
+        self.assertIn("models/stock_predictor.pkl", test_meta)
+
+    def test_implementation_task_detection(self):
+        """Tasks requesting bug fixes or implementations must be flagged as requiring production changes."""
+        self.assertTrue(is_implementation_task("Find and fix a reproducible bug."))
+        self.assertTrue(is_implementation_task("Implement user authentication feature"))
+        self.assertTrue(is_implementation_task("Resolve recursive forecasting feature drift"))
+        self.assertFalse(is_implementation_task("Update README with project documentation"))
+
+    def test_scenario_task_not_implemented_rejection(self):
+        """When implementation_status is NOT_IMPLEMENTED, review is rejected even if tests pass."""
+        pass_test = [{"command": ["pytest"], "outcome": "PASS", "passed": True, "metrics": {"collected": 4, "passed": 4}}]
+        approve_review = "VERDICT: APPROVE\nSummary: Tests passed."
+        verdict, tp, ra, err, details = compute_verification_state(
+            pass_test,
+            approve_review,
+            implementation_status="NOT_IMPLEMENTED"
+        )
+        self.assertEqual(verdict, "PARTIAL")
+        self.assertTrue(tp)
+        self.assertFalse(ra)
+        self.assertEqual(details["review_state"], "REJECTED")
+        self.assertEqual(details["regression_status"], "NOT_IMPLEMENTED")
+        self.assertIn("No production code changes were made", details["rejection_reasons"][0])
+
+    def test_scenario_failure_to_pass_evidence_recorded(self):
+        """Failure-to-pass status must be recorded in baseline_comparison."""
+        pass_test = [{"command": ["pytest"], "outcome": "PASS", "passed": True, "metrics": {"collected": 4, "passed": 4}}]
+        approve_review = "VERDICT: APPROVE"
+        verdict, tp, ra, err, details = compute_verification_state(
+            pass_test,
+            approve_review,
+            implementation_status="IMPLEMENTED",
+            failure_to_pass_verified=True,
+            reproduced_on_baseline=True,
+        )
+        self.assertEqual(verdict, "PASS")
+        self.assertTrue(tp)
+        self.assertTrue(ra)
+        self.assertTrue(details["baseline_comparison"]["failure_to_pass_verified"])
+        self.assertTrue(details["baseline_comparison"]["reproduced_on_baseline"])
 
 
 if __name__ == "__main__":
