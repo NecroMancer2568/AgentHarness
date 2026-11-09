@@ -1,9 +1,116 @@
 import { ReactNode } from 'react'
 import { ArrowUpRight, CheckCircle2, AlertCircle, Clock3, Loader2, TerminalSquare, XCircle } from 'lucide-react'
-export function PageHeader({eyebrow,title,description,action}:{eyebrow:string;title:string;description?:string;action?:ReactNode}){return <div className="page-header"><div><div className="eyebrow">{eyebrow}</div><h1>{title}</h1>{description&&<p>{description}</p>}</div>{action&&<div className="header-action">{action}</div>}</div>}
-export function StatCard({label,value,detail,icon:Icon,tone='blue'}:{label:string;value:string|number;detail?:string;icon:any;tone?:string}){return <div className="stat-card"><div className="stat-top"><span>{label}</span><div className={`stat-icon ${tone}`}><Icon size={17}/></div></div><div className="stat-value">{value}</div>{detail&&<div className="stat-detail">{detail}</div>}</div>}
-export function StatusPill({status}:{status:string}){const s=status.toLowerCase();const Icon=s==='succeeded'?CheckCircle2:s==='failed'?XCircle:s==='running'?Loader2:s==='queued'?Clock3:AlertCircle;return <span className={`status-pill ${s}`}><Icon size={12} className={s==='running'?'spin':''}/>{s}</span>}
-export function Button({children,onClick,kind='primary',disabled=false}:{children:ReactNode;onClick?:()=>void;kind?:'primary'|'secondary'|'ghost'|'danger';disabled?:boolean}){return <button disabled={disabled} className={`button ${kind}`} onClick={onClick}>{children}{kind==='primary'&&<ArrowUpRight size={15}/>}</button>}
-export function EmptyState({title,body,action}:{title:string;body:string;action?:ReactNode}){return <div className="empty-state"><div className="empty-icon"><TerminalSquare size={24}/></div><h3>{title}</h3><p>{body}</p>{action}</div>}
-export function formatDuration(ms?:number|null){if(ms==null)return '—';if(ms<1000)return `${ms} ms`;return `${(ms/1000).toFixed(1)} s`}
-export function formatNumber(n?:number|null){return n==null?'—':n.toLocaleString()}
+
+export function PageHeader({
+  eyebrow,
+  title,
+  description,
+  action,
+}: {
+  eyebrow: string
+  title: string
+  description?: string
+  action?: ReactNode
+}) {
+  return (
+    <div className="hd">
+      <div>
+        <div className="ey">{eyebrow}</div>
+        <h1 className="h1">{title}</h1>
+        {description && <p className="pp">{description}</p>}
+      </div>
+      {action && <div>{action}</div>}
+    </div>
+  )
+}
+
+export function StatCard({
+  label,
+  value,
+  detail,
+}: {
+  label: string
+  value: string | number
+  detail?: string
+  icon?: any
+  tone?: string
+}) {
+  return (
+    <div className="c">
+      <div className="lb">{label}</div>
+      <div className="nm">{value}</div>
+      {detail && <div className="sb">{detail}</div>}
+    </div>
+  )
+}
+
+export function StatusPill({ status }: { status: string }) {
+  const s = status.toLowerCase()
+  const Icon =
+    s === 'succeeded' || s === 'pass' || s === 'approved'
+      ? CheckCircle2
+      : s === 'failed' || s === 'fail' || s === 'rejected'
+      ? XCircle
+      : s === 'running'
+      ? Loader2
+      : s === 'queued'
+      ? Clock3
+      : AlertCircle
+  return (
+    <span className={`pl ${s}`}>
+      <Icon size={13} className={s === 'running' ? 'spin' : ''} />
+      {status.toUpperCase()}
+    </span>
+  )
+}
+
+export function Button({
+  children,
+  onClick,
+  kind = 'primary',
+  disabled = false,
+}: {
+  children: ReactNode
+  onClick?: () => void
+  kind?: 'primary' | 'secondary' | 'ghost' | 'danger'
+  disabled?: boolean
+}) {
+  const cls = `bt ${kind === 'secondary' ? 'secondary' : kind === 'danger' ? 'danger' : ''}`
+  return (
+    <button disabled={disabled} className={cls} onClick={onClick}>
+      {children}
+      {kind === 'primary' && <ArrowUpRight size={16} />}
+    </button>
+  )
+}
+
+export function EmptyState({
+  title,
+  body,
+  action,
+}: {
+  title: string
+  body: string
+  action?: ReactNode
+}) {
+  return (
+    <div className="empty-state">
+      <div className="empty-icon">
+        <TerminalSquare size={24} />
+      </div>
+      <h3>{title}</h3>
+      <p>{body}</p>
+      {action}
+    </div>
+  )
+}
+
+export function formatDuration(ms?: number | null) {
+  if (ms == null) return '—'
+  if (ms < 1000) return `${ms} ms`
+  return `${(ms / 1000).toFixed(1)} s`
+}
+
+export function formatNumber(n?: number | null) {
+  return n == null ? '—' : n.toLocaleString()
+}

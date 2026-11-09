@@ -1,98 +1,1419 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Activity, ArrowDownRight, ArrowRight, Bot, Check, CheckCircle2, ChevronRight, CircleDot, Clock3, Code2, Cpu, FileArchive, FileCode2, FolderPlus, GitBranch, Gauge, Globe, HardDrive, Layers3, Play, Plus, RefreshCw, ShieldCheck, Terminal, Timer, Trash2, UploadCloud, Zap } from 'lucide-react'
+import {
+  Activity,
+  ArrowRight,
+  Bot,
+  CheckCircle2,
+  CircleDot,
+  Clock3,
+  Code2,
+  Cpu,
+  FileArchive,
+  FileCode2,
+  FolderPlus,
+  GitBranch,
+  HardDrive,
+  Layers3,
+  Play,
+  Plus,
+  RefreshCw,
+  ShieldCheck,
+  Terminal,
+  Timer,
+  Trash2,
+  UploadCloud,
+  Zap,
+} from 'lucide-react'
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
-import Sidebar, { Page } from './components/Sidebar'
+import TopNav, { Page, WheelNav } from './components/Sidebar'
 import { Button, EmptyState, formatDuration, formatNumber, PageHeader, StatCard, StatusPill } from './components/Primitives'
 import { api, BenchmarkRun, BenchmarkTask, EventItem, Repository, Run } from './api'
 
-const navTitles:Record<Page,string>={overview:'Overview',run:'Run evaluation',benchmark:'Benchmark suite',live:'Live executions',history:'Run history',metrics:'Metrics & reports',repositories:'Repositories',models:'Ollama & model',settings:'Settings'}
-function App(){
- const [page,setPage]=useState<Page>('overview')
- const [runs,setRuns]=useState<Run[]>([]); const [metrics,setMetrics]=useState<any>({}); const [repos,setRepos]=useState<Repository[]>([]); const [settings,setSettings]=useState<any>({});
- const [loading,setLoading]=useState(true); const [error,setError]=useState(''); const [selectedRunId,setSelectedRunId]=useState(''); const [selectedRun,setSelectedRun]=useState<Run|null>(null); const [events,setEvents]=useState<EventItem[]>([])
- const [selectedRepoForRun, setSelectedRepoForRun] = useState('')
- const refresh=useCallback(async()=>{try{const [r,m,repo,s]=await Promise.all([api.runs(100),api.metrics(),api.repositories(),api.settings()]);setRuns(r.runs);setMetrics(m);setRepos(repo.repositories);setSettings(s);setError('')}catch(e:any){setError(e.message||'Unable to connect to the API. Start the FastAPI backend.')}finally{setLoading(false)}},[])
- useEffect(()=>{refresh();const t=setInterval(refresh,5000);return()=>clearInterval(t)},[refresh])
- const openRun=useCallback(async(id:string)=>{setSelectedRunId(id);setPage('live');try{const [r,e]=await Promise.all([api.run(id),api.events(id)]);setSelectedRun(r);setEvents(e.events)}catch(e:any){setError(e.message)}},[])
- useEffect(()=>{const handler=(event:Event)=>{const custom=event as CustomEvent<{id:string}>;if(custom.detail?.id)openRun(custom.detail.id)};window.addEventListener('agentharness:open-run',handler);return()=>window.removeEventListener('agentharness:open-run',handler)},[openRun])
- useEffect(()=>{if(!selectedRunId||page!=='live')return;let alive=true;const poll=async()=>{try{const [r,e]=await Promise.all([api.run(selectedRunId),api.events(selectedRunId,events.at(-1)?.id||0)]);if(!alive)return;setSelectedRun(r);if(e.events.length)setEvents(prev=>[...prev,...e.events.filter(x=>!prev.some(p=>p.id===x.id))])}catch{}};poll();const timer=setInterval(poll,1500);return()=>{alive=false;clearInterval(timer)}},[selectedRunId,page])
- const activeRuns=runs.filter(r=>r.status==='running'||r.status==='queued')
- const navigate=(next:Page)=>{setPage(next);if(next!=='live'){setSelectedRunId('');setSelectedRun(null);setEvents([])}}
- return <div className="app-shell"><Sidebar page={page} onNavigate={navigate}/><main className="main"><header className="topbar"><div className="breadcrumbs"><span>AgentHarness Lab</span><ChevronRight size={14}/><strong>{navTitles[page]}</strong></div><div className="topbar-right"><span className="cloud-model"><span className="online-dot"/> DeepSeek V4 Pro</span><button className="icon-button" title="Refresh data" onClick={refresh}><RefreshCw size={16}/></button><div className="avatar">AH</div></div></header><div className="content">
- {error&&<div className="error-banner"><CircleDot size={16}/><span>{error}</span><button onClick={refresh}>Retry</button></div>}
- {page==='overview'&&<Overview runs={runs} metrics={metrics} repos={repos} loading={loading} onNavigate={navigate} onOpenRun={openRun}/>}
- {page==='run'&&<RunEvaluation repos={repos} initialRepo={selectedRepoForRun} onCreated={async id=>{await refresh();await openRun(id)}} onNavigate={navigate}/>}
- {page==='benchmark'&&<BenchmarkPage/>}
- {page==='live'&&<LiveExecution run={selectedRun} events={events} onCancel={async()=>{if(selectedRunId){await api.cancel(selectedRunId);await refresh()}}} onRefresh={refresh}/>}
- {page==='history'&&<RunHistory runs={runs} onOpen={openRun} onNavigate={navigate}/>}
- {page==='metrics'&&<MetricsPage metrics={metrics} runs={runs} onNavigate={navigate}/>}
- {page==='repositories'&&<RepositoriesPage repos={repos} root={settings.repos_root} onRegistered={refresh} onNavigate={navigate} onSelectRepoForRun={r=>setSelectedRepoForRun(r)}/>}
- {page==='models'&&<ModelsPage settings={settings}/>}
- {page==='settings'&&<SettingsPage settings={settings} onRefresh={refresh}/>}
- <footer className="footer"><span>AgentHarness Lab <b>·</b> local-first agent workbench</span><span><span className="online-dot"/> API metrics are sourced from recorded runs</span></footer>
- </div></main></div>
+function App() {
+  const [page, setPage] = useState<Page>('overview')
+  const [runs, setRuns] = useState<Run[]>([])
+  const [metrics, setMetrics] = useState<any>({})
+  const [repos, setRepos] = useState<Repository[]>([])
+  const [settings, setSettings] = useState<any>({})
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [selectedRunId, setSelectedRunId] = useState('')
+  const [selectedRun, setSelectedRun] = useState<Run | null>(null)
+  const [events, setEvents] = useState<EventItem[]>([])
+  const [selectedRepoForRun, setSelectedRepoForRun] = useState('')
+  const [showIntro, setShowIntro] = useState(true)
+
+  useEffect(() => {
+    const timer = setTimeout(() => setShowIntro(false), 3400)
+    return () => clearTimeout(timer)
+  }, [])
+
+  const refresh = useCallback(async () => {
+    try {
+      const [r, m, repo, s] = await Promise.all([
+        api.runs(100),
+        api.metrics(),
+        api.repositories(),
+        api.settings(),
+      ])
+      setRuns(r.runs)
+      setMetrics(m)
+      setRepos(repo.repositories)
+      setSettings(s)
+      setError('')
+    } catch (e: any) {
+      setError(e.message || 'Unable to connect to the API. Start the FastAPI backend.')
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    refresh()
+    const t = setInterval(refresh, 5000)
+    return () => clearInterval(t)
+  }, [refresh])
+
+  const openRun = useCallback(async (id: string) => {
+    setSelectedRunId(id)
+    setPage('live')
+    try {
+      const [r, e] = await Promise.all([api.run(id), api.events(id)])
+      setSelectedRun(r)
+      setEvents(e.events)
+    } catch (e: any) {
+      setError(e.message)
+    }
+  }, [])
+
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const custom = event as CustomEvent<{ id: string }>
+      if (custom.detail?.id) openRun(custom.detail.id)
+    }
+    window.addEventListener('agentharness:open-run', handler)
+    return () => window.removeEventListener('agentharness:open-run', handler)
+  }, [openRun])
+
+  useEffect(() => {
+    if (!selectedRunId || page !== 'live') return
+    let alive = true
+    const poll = async () => {
+      try {
+        const [r, e] = await Promise.all([
+          api.run(selectedRunId),
+          api.events(selectedRunId, events.at(-1)?.id || 0),
+        ])
+        if (!alive) return
+        setSelectedRun(r)
+        if (e.events.length) {
+          setEvents((prev) => [
+            ...prev,
+            ...e.events.filter((x) => !prev.some((p) => p.id === x.id)),
+          ])
+        }
+      } catch {}
+    }
+    poll()
+    const timer = setInterval(poll, 1500)
+    return () => {
+      alive = false
+      clearInterval(timer)
+    }
+  }, [selectedRunId, page, events])
+
+  const activeRuns = runs.filter((r) => r.status === 'running' || r.status === 'queued')
+  const navigate = (next: Page) => {
+    setPage(next)
+    if (next !== 'live') {
+      setSelectedRunId('')
+      setSelectedRun(null)
+      setEvents([])
+    }
+  }
+
+  return (
+    <div className="rt">
+      {/* 3D Intro Animation */}
+      {showIntro && (
+        <div className="pre" aria-hidden="true">
+          <div className="pw">
+            <span style={{ '--i': 0 } as any}>A</span>
+            <span style={{ '--i': 1 } as any}>g</span>
+            <span style={{ '--i': 2 } as any}>e</span>
+            <span style={{ '--i': 3 } as any}>n</span>
+            <span style={{ '--i': 4 } as any}>t</span>
+            <span className="hl" style={{ '--i': 5 } as any}>H</span>
+            <span className="hl" style={{ '--i': 6 } as any}>a</span>
+            <span className="hl" style={{ '--i': 7 } as any}>r</span>
+            <span className="hl" style={{ '--i': 8 } as any}>n</span>
+            <span className="hl" style={{ '--i': 9 } as any}>e</span>
+            <span className="hl" style={{ '--i': 10 } as any}>s</span>
+            <span className="hl" style={{ '--i': 11 } as any}>s</span>
+          </div>
+          <div className="ps2">LOCAL WORKBENCH</div>
+          <div className="pb">
+            <i />
+          </div>
+        </div>
+      )}
+
+      {/* Glowing background orbs */}
+      <div className="b b1" />
+      <div className="b b2" />
+
+      {/* Top bar */}
+      <header className="tp">
+        <div className="br">
+          <div className="lg" />
+          <span>AgentHarness</span>
+          <span
+            className="mono"
+            style={{
+              fontSize: 11,
+              fontWeight: 400,
+              letterSpacing: '.14em',
+              color: 'rgba(255,255,255,.6)',
+            }}
+          >
+            LOCAL WORKBENCH
+          </span>
+        </div>
+
+        <TopNav
+          page={page}
+          onNavigate={navigate}
+          hasActiveRun={activeRuns.length > 0}
+        />
+
+        <div className="tp-right">
+          <div className="ch">
+            <span className="online-dot" />
+            <span>{settings.model || 'DeepSeek V4 Pro'}</span>
+          </div>
+          <button
+            className="icon-btn"
+            title="Refresh data"
+            onClick={refresh}
+          >
+            <RefreshCw size={15} />
+          </button>
+        </div>
+      </header>
+
+      {/* Main Content */}
+      <main className="mn">
+        {error && (
+          <div className="error-banner">
+            <CircleDot size={16} />
+            <span>{error}</span>
+            <button onClick={refresh}>Retry</button>
+          </div>
+        )}
+
+        {page === 'overview' && (
+          <Overview
+            runs={runs}
+            metrics={metrics}
+            repos={repos}
+            loading={loading}
+            onNavigate={navigate}
+            onOpenRun={openRun}
+          />
+        )}
+
+        {page === 'run' && (
+          <RunEvaluation
+            repos={repos}
+            initialRepo={selectedRepoForRun}
+            onCreated={async (id) => {
+              await refresh()
+              await openRun(id)
+            }}
+            onNavigate={navigate}
+          />
+        )}
+
+        {page === 'benchmark' && <BenchmarkPage />}
+
+        {page === 'live' && (
+          <LiveExecution
+            run={selectedRun}
+            events={events}
+            onCancel={async () => {
+              if (selectedRunId) {
+                await api.cancel(selectedRunId)
+                await refresh()
+              }
+            }}
+            onRefresh={refresh}
+          />
+        )}
+
+        {page === 'history' && (
+          <RunHistory
+            runs={runs}
+            onOpen={openRun}
+            onNavigate={navigate}
+          />
+        )}
+
+        {page === 'metrics' && (
+          <MetricsPage
+            metrics={metrics}
+            runs={runs}
+            onNavigate={navigate}
+          />
+        )}
+
+        {page === 'repositories' && (
+          <RepositoriesPage
+            repos={repos}
+            root={settings.repos_root}
+            onRegistered={refresh}
+            onNavigate={navigate}
+            onSelectRepoForRun={(r) => setSelectedRepoForRun(r)}
+          />
+        )}
+
+        {page === 'models' && <ModelsPage settings={settings} />}
+
+        {page === 'settings' && (
+          <SettingsPage settings={settings} onRefresh={refresh} />
+        )}
+      </main>
+
+      {/* Rotary Wheel Navigation at the bottom */}
+      <WheelNav page={page} onNavigate={navigate} />
+    </div>
+  )
 }
 
-function Overview({runs,metrics,repos,loading,onNavigate,onOpenRun}:{runs:Run[];metrics:any;repos:Repository[];loading:boolean;onNavigate:(p:Page)=>void;onOpenRun:(id:string)=>void}){
- const recent=runs.slice(0,5);const chart=useMemo(()=>runs.slice(0,10).reverse().map((r,i)=>({name:`#${i+1}`,duration:r.duration_ms?Math.round(r.duration_ms/1000):0,tokens:r.total_tokens||0})),[runs])
- return <><PageHeader eyebrow="SYSTEM OVERVIEW" title="Your agent workbench" description="Run real software tasks, inspect agent traces, and track verified outcomes." action={<Button onClick={()=>onNavigate('run')}><Play size={15}/> New evaluation</Button>}/>
- <div className="stats-grid"><StatCard label="Verified success rate" value={metrics.success_rate==null?'—':`${metrics.success_rate}%`} detail={`${formatNumber(metrics.successful_runs)} successful runs`} icon={ShieldCheck} tone="green"/><StatCard label="Completed runs" value={formatNumber(metrics.completed_runs)} detail={`${formatNumber(runs.filter(r=>r.status==='running').length)} currently running`} icon={Activity} tone="blue"/><StatCard label="Total LLM tokens" value={formatNumber(metrics.total_tokens)} detail={`${formatNumber(metrics.llm_calls)} recorded model calls`} icon={Zap} tone="violet"/><StatCard label="Average duration" value={formatDuration(metrics.average_duration_ms)} detail={`p95 ${formatDuration(metrics.p95_duration_ms)}`} icon={Timer} tone="amber"/></div>
- <div className="overview-grid"><section className="panel chart-panel"><div className="panel-heading"><div><h2>Execution duration</h2><p>Recent recorded runs · seconds</p></div><button className="text-button" onClick={()=>onNavigate('metrics')}>View metrics <ArrowRight size={14}/></button></div>{chart.length?<div className="chart-wrap"><ResponsiveContainer width="100%" height="100%"><AreaChart data={chart} margin={{top:8,right:8,left:-18,bottom:0}}><defs><linearGradient id="durationFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#5b8cff" stopOpacity={0.28}/><stop offset="100%" stopColor="#5b8cff" stopOpacity={0.01}/></linearGradient></defs><CartesianGrid strokeDasharray="3 4" stroke="#232a36" vertical={false}/><XAxis dataKey="name" tick={{fill:'#798497',fontSize:11}} axisLine={false} tickLine={false}/><YAxis tick={{fill:'#798497',fontSize:11}} axisLine={false} tickLine={false}/><Tooltip contentStyle={{background:'#141923',border:'1px solid #2b3444',borderRadius:10,color:'#eef2fa'}} formatter={(v:any)=>[`${v}s`,'Duration']}/><Area type="monotone" dataKey="duration" stroke="#6c96ff" strokeWidth={2} fill="url(#durationFill)"/></AreaChart></ResponsiveContainer></div>:<EmptyState title="No execution data yet" body="Run a task to populate the duration chart." action={<Button onClick={()=>onNavigate('run')}>Run first task</Button>}/>}<div className="chart-legend"><span><i className="legend-dot blue-dot"/> Wall-clock duration</span><span>Only completed runs with recorded durations are shown</span></div></section>
- <section className="panel activity-panel"><div className="panel-heading"><div><h2>Recent executions</h2><p>Latest real task runs</p></div><button className="text-button" onClick={()=>onNavigate('history')}>All runs <ArrowRight size={14}/></button></div>{recent.length?<div className="recent-list">{recent.map(r=><button className="recent-row" key={r.id} onClick={()=>onOpenRun(r.id)}><div className="recent-icon"><Code2 size={16}/></div><div className="recent-main"><strong>{r.repository}</strong><span>{r.task}</span><small>{new Date(r.created_at).toLocaleString()}</small></div><div className="recent-meta"><StatusPill status={r.status}/><small>{formatDuration(r.duration_ms)}</small></div></button>)}</div>:<EmptyState title="Nothing run yet" body="Your recent task executions will appear here." action={<Button onClick={()=>onNavigate('run')}>Start an evaluation</Button>}/>}</section></div>
- <div className="section-heading"><div><h2>Workspace snapshot</h2><p>Current local setup</p></div></div><div className="snapshot-grid"><div className="snapshot-card"><div className="snapshot-icon"><GitBranch size={18}/></div><div><strong>{repos.length} repositories</strong><span>Git repositories available to the harness</span></div><button onClick={()=>onNavigate('repositories')}><ArrowRight size={16}/></button></div><div className="snapshot-card"><div className="snapshot-icon purple"><Bot size={18}/></div><div><strong>DeepSeek V4 Pro</strong><span>Ollama Cloud inference endpoint</span></div><button onClick={()=>onNavigate('models')}><ArrowRight size={16}/></button></div><div className="snapshot-card"><div className="snapshot-icon green"><HardDrive size={18}/></div><div><strong>Local workspace</strong><span>Disposable Git clones for execution</span></div><button onClick={()=>onNavigate('settings')}><ArrowRight size={16}/></button></div></div>
- </>
+function Overview({
+  runs,
+  metrics,
+  repos,
+  loading: _loading,
+  onNavigate,
+  onOpenRun,
+}: {
+  runs: Run[]
+  metrics: any
+  repos: Repository[]
+  loading: boolean
+  onNavigate: (p: Page) => void
+  onOpenRun: (id: string) => void
+}) {
+  const recent = runs.slice(0, 5)
+  const chart = useMemo(
+    () =>
+      runs
+        .slice(0, 10)
+        .reverse()
+        .map((r, i) => ({
+          name: `#${i + 1}`,
+          duration: r.duration_ms ? Math.round(r.duration_ms / 1000) : 0,
+          tokens: r.total_tokens || 0,
+        })),
+    [runs]
+  )
+
+  return (
+    <>
+      <PageHeader
+        eyebrow="Workspace"
+        title="Overview"
+        description="Run real software tasks, inspect agent traces, and track verified outcomes."
+        action={
+          <Button onClick={() => onNavigate('run')}>
+            <Play size={15} /> New evaluation
+          </Button>
+        }
+      />
+
+      <div className="gr c4">
+        <StatCard
+          label="Verified success rate"
+          value={metrics.success_rate == null ? '0%' : `${metrics.success_rate}%`}
+          detail={`${formatNumber(metrics.successful_runs || 0)} successful runs`}
+        />
+        <StatCard
+          label="Completed runs"
+          value={formatNumber(metrics.completed_runs || 0)}
+          detail={`${formatNumber(runs.filter((r) => r.status === 'running').length)} currently running`}
+        />
+        <StatCard
+          label="Total LLM tokens"
+          value={formatNumber(metrics.total_tokens || 0)}
+          detail={`${formatNumber(metrics.llm_calls || 0)} recorded model calls`}
+        />
+        <StatCard
+          label="Average duration"
+          value={formatDuration(metrics.average_duration_ms)}
+          detail={`p95 ${formatDuration(metrics.p95_duration_ms)}`}
+        />
+      </div>
+
+      <div className="gr c2">
+        <div className="c">
+          <h2>Execution duration</h2>
+          <div className="sb">Recent recorded runs · seconds</div>
+          {chart.length ? (
+            <div className="chart-wrap">
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={chart} margin={{ top: 12, right: 12, left: -20, bottom: 0 }}>
+                  <defs>
+                    <linearGradient id="durationGrad" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor="#ffffff" stopOpacity={0.35} />
+                      <stop offset="100%" stopColor="#ffffff" stopOpacity={0.01} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="4 6" stroke="rgba(255,255,255,.12)" vertical={false} />
+                  <XAxis dataKey="name" tick={{ fill: 'rgba(255,255,255,.6)', fontSize: 12, fontFamily: 'JetBrains Mono' }} axisLine={false} tickLine={false} />
+                  <YAxis tick={{ fill: 'rgba(255,255,255,.6)', fontSize: 12, fontFamily: 'JetBrains Mono' }} axisLine={false} tickLine={false} />
+                  <Tooltip
+                    contentStyle={{
+                      background: '#0d0d0d',
+                      border: '1px solid rgba(255,255,255,0.2)',
+                      borderRadius: 14,
+                      color: '#ffffff',
+                      fontFamily: 'Space Grotesk',
+                    }}
+                    formatter={(v: any) => [`${v}s`, 'Duration']}
+                  />
+                  <Area type="monotone" dataKey="duration" stroke="#ffffff" strokeWidth={2.5} fill="url(#durationGrad)" />
+                </AreaChart>
+              </ResponsiveContainer>
+            </div>
+          ) : (
+            <EmptyState
+              title="No execution data yet"
+              body="Run a task to populate the duration chart."
+              action={<Button onClick={() => onNavigate('run')}>Run first task</Button>}
+            />
+          )}
+        </div>
+
+        <div className="c">
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+            <h2>Recent executions</h2>
+            <button className="bt secondary sm" onClick={() => onNavigate('history')}>
+              All runs <ArrowRight size={13} />
+            </button>
+          </div>
+          {recent.length ? (
+            <div>
+              {recent.map((r) => (
+                <div className="rw clickable-row" key={r.id} onClick={() => onOpenRun(r.id)}>
+                  <div>
+                    <strong style={{ fontSize: 15 }}>{r.repository}</strong>
+                    <div className="sb" style={{ marginTop: 4 }}>
+                      {r.task.slice(0, 48)}... · {new Date(r.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                    </div>
+                  </div>
+                  <div style={{ display: 'flex', gap: 14, alignItems: 'center' }}>
+                    <StatusPill status={r.status} />
+                    <span className="mono" style={{ fontSize: 13, color: 'rgba(255,255,255,0.7)' }}>
+                      {formatDuration(r.duration_ms)}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <EmptyState
+              title="Nothing run yet"
+              body="Your recent task executions will appear here."
+              action={<Button onClick={() => onNavigate('run')}>Start an evaluation</Button>}
+            />
+          )}
+        </div>
+      </div>
+
+      <div className="gr c3" style={{ marginTop: 24 }}>
+        <div className="c clickable-row" onClick={() => onNavigate('repositories')}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 }}>
+            <GitBranch size={20} />
+            <h2>{repos.length} Repositories</h2>
+          </div>
+          <div className="sb">Git repositories available to the harness</div>
+        </div>
+
+        <div className="c clickable-row" onClick={() => onNavigate('models')}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 }}>
+            <Bot size={20} />
+            <h2>Inference Model</h2>
+          </div>
+          <div className="sb">Ollama inference endpoint &amp; configuration</div>
+        </div>
+
+        <div className="c clickable-row" onClick={() => onNavigate('settings')}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 }}>
+            <HardDrive size={20} />
+            <h2>Local Workspace</h2>
+          </div>
+          <div className="sb">Isolated Git clones for safe evaluation</div>
+        </div>
+      </div>
+    </>
+  )
 }
 
-function BenchmarkPage(){
- const [tasks,setTasks]=useState<BenchmarkTask[]>([]);const [datasets,setDatasets]=useState<{name:string;task_count:number|null;is_default:boolean;error?:string}[]>([]);const [dataset,setDataset]=useState('tasks.jsonl');const [history,setHistory]=useState<BenchmarkRun[]>([]);const [selected,setSelected]=useState<BenchmarkRun|null>(null);const [repetitions,setRepetitions]=useState(1);const [busy,setBusy]=useState(false);const [error,setError]=useState('');
- const refresh=useCallback(async()=>{try{const [d,h]=await Promise.all([api.benchmarkDatasets(),api.benchmarks()]);setDatasets(d.datasets);setHistory(h.benchmarks);const current=d.datasets.find(x=>x.name===dataset);if(!current&&d.datasets.length)setDataset(d.datasets[0].name);setError('')}catch(e:any){setError(e.message||'Unable to load benchmark suite. Start the backend and check the manifest.')}},[dataset]);
- useEffect(()=>{refresh()},[refresh]);
- useEffect(()=>{let alive=true;api.benchmarkTasks(dataset).then(value=>{if(alive)setTasks(value.tasks)}).catch((e:any)=>{if(alive)setError(e.message)});return()=>{alive=false}},[dataset]);
- useEffect(()=>{if(!selected||!['queued','running'].includes(selected.status))return;let alive=true;const poll=async()=>{try{const latest=await api.benchmark(selected.id);if(!alive)return;setSelected(latest);const list=await api.benchmarks();if(alive)setHistory(list.benchmarks)}catch(e:any){if(alive)setError(e.message)}};poll();const timer=setInterval(poll,2000);return()=>{alive=false;clearInterval(timer)}},[selected?.id,selected?.status]);
- const start=async()=>{setBusy(true);setError('');try{const created=await api.startBenchmark(repetitions,dataset);const run=await api.benchmark(created.id);setSelected(run);await refresh()}catch(e:any){setError(e.message||'Could not start benchmark. Confirm all benchmark repositories are available.')}finally{setBusy(false)}};
- const open=async(id:string)=>{try{setSelected(await api.benchmark(id));setError('')}catch(e:any){setError(e.message)}};
- const cancel=async()=>{if(!selected)return;try{await api.cancelBenchmark(selected.id);setSelected(await api.benchmark(selected.id))}catch(e:any){setError(e.message)}};
- const summary=selected?.summary||{};const fmt=(n:any)=>n==null?'—':Number(n).toLocaleString();
- return <><PageHeader eyebrow="REPEATABLE ENGINEERING CHECKS" title="Benchmark suite" description="Run the same fixed task set against the configured harness. Scores come from actual repository runs, test results, and reviewer gates." action={<Button onClick={start} disabled={busy||tasks.length===0||!!selected&&['queued','running'].includes(selected.status)}><Play size={15}/>{busy?'Starting…':'Run benchmark'}</Button>}/>
- {error&&<div className="error-banner"><CircleDot size={16}/><span>{error}</span><button onClick={refresh}>Retry</button></div>}
- <div className="benchmark-controls panel"><div><strong>Default task set</strong><p>{tasks.length} tasks · each sample runs in a disposable clone</p></div><label className="benchmark-repetitions">Dataset <select className="field-control" value={dataset} onChange={e=>setDataset(e.target.value)}>{datasets.map(d=><option key={d.name} value={d.name}>{d.name} ({d.task_count??'invalid'})</option>)}</select></label><label className="benchmark-repetitions">Repetitions <select className="field-control" value={repetitions} onChange={e=>setRepetitions(Number(e.target.value))}><option value={1}>1×</option><option value={2}>2×</option><option value={3}>3×</option><option value={5}>5×</option></select></label><Button kind="secondary" onClick={refresh}><RefreshCw size={14}/> Refresh</Button></div>
- <div className="benchmark-task-grid">{tasks.map(t=><div className="panel benchmark-task" key={t.id}><div className="benchmark-task-top"><span className="tag">{t.category}</span><code>{t.id}</code></div><h3>{t.expected_behavior||t.input}</h3><p>{t.repository}</p><code className="benchmark-command">{t.test_command}</code></div>)}</div>
- <div className="section-heading"><div><h2>Benchmark results</h2><p>Completed samples remain in the report, including failures and timeouts.</p></div></div>
- {selected&&<><div className="benchmark-run-header panel"><div><div className="benchmark-run-title"><strong>Run {selected.id}</strong><StatusPill status={selected.status==='completed'?(summary.failed_samples===0?'succeeded':'failed'):selected.status}/></div><p>{selected.completed_samples}/{selected.planned_samples} samples · {selected.model}</p></div><div className="benchmark-actions">{['queued','running'].includes(selected.status)&&<Button kind="danger" onClick={cancel}>Cancel benchmark</Button>}</div></div>
- <div className="stats-grid benchmark-stats"><StatCard label="Verified success rate" value={summary.success_rate_percent==null?'—':`${summary.success_rate_percent}%`} detail={`${fmt(summary.successful_samples)} / ${fmt(summary.attempted_samples)} samples`} icon={ShieldCheck} tone="green"/><StatCard label="Average duration" value={formatDuration(summary.average_duration_ms)} detail={`p95 ${formatDuration(summary.p95_duration_ms)}`} icon={Timer} tone="blue"/><StatCard label="Total tokens" value={fmt(summary.total_tokens)} detail={`${fmt(summary.total_llm_calls)} model calls`} icon={Zap} tone="violet"/><StatCard label="Verification gates" value={`${fmt(summary.test_pass_count)} tests / ${fmt(summary.review_approval_count)} reviews`} detail="Actual test and reviewer outcomes" icon={Check} tone="amber"/></div>
- <div className="panel table-panel"><div className="panel-heading"><div><h2>Sample-level results</h2><p>Each row links to the actual execution trace.</p></div></div>{selected.results?.length?<table><thead><tr><th>Task</th><th>Repetition</th><th>Status</th><th>Tests</th><th>Review</th><th>Duration</th><th>Tokens</th><th></th></tr></thead><tbody>{selected.results.map((r,i)=><tr key={`${r.task_id}-${r.repetition}-${i}`}><td><strong>{r.task_id}</strong><small>{r.repository}</small>{r.error&&<small className="text-muted">{r.error}</small>}</td><td>{r.repetition}</td><td><StatusPill status={r.success?'succeeded':r.status}/></td><td>{r.test_passed?'Passed':'Not passed'}</td><td>{r.review_approved?'Approved':'Not approved'}</td><td>{formatDuration(r.duration_ms)}</td><td>{fmt(r.total_tokens)}</td><td><button className="text-button" onClick={()=>{setPageHackOpenRun(r.run_id)}}>Inspect <ArrowRight size={13}/></button></td></tr>)}</tbody></table>:<EmptyState title="Waiting for benchmark samples" body="The sample table will populate as each real run completes."/>}</div></>}
- <div className="section-heading"><div><h2>Previous benchmark runs</h2><p>Stored reports from this local installation.</p></div></div><div className="panel table-panel">{history.length?<table><thead><tr><th>Benchmark</th><th>Status</th><th>Progress</th><th>Success rate</th><th>Created</th><th></th></tr></thead><tbody>{history.map(h=><tr key={h.id}><td><strong>{h.id}</strong><small>{h.model}</small></td><td><StatusPill status={h.status}/></td><td>{h.completed_samples}/{h.planned_samples}</td><td>{h.summary?.success_rate_percent==null?'—':`${h.summary.success_rate_percent}%`}</td><td>{new Date(h.created_at).toLocaleString()}</td><td><button className="text-button" onClick={()=>open(h.id)}>Open <ArrowRight size={13}/></button></td></tr>)}</tbody></table>:<EmptyState title="No benchmark history yet" body="Start a benchmark to create the first report."/>}</div>
- <div className="note-box wide-note"><ShieldCheck size={16}/><span>The bundled task set is an intentionally buggy local fixture for deterministic smoke checks. For portfolio-level results on real GitHub repositories, clone the target repositories under the allowed root and add task rows with precise prompts and test commands to the JSONL manifest.</span></div>
- </>;
- function setPageHackOpenRun(id:string){window.dispatchEvent(new CustomEvent('agentharness:open-run',{detail:{id}}))}
+function BenchmarkPage() {
+  const [tasks, setTasks] = useState<BenchmarkTask[]>([])
+  const [datasets, setDatasets] = useState<{ name: string; task_count: number | null; is_default: boolean; error?: string }[]>([])
+  const [dataset, setDataset] = useState('tasks.jsonl')
+  const [history, setHistory] = useState<BenchmarkRun[]>([])
+  const [selected, setSelected] = useState<BenchmarkRun | null>(null)
+  const [repetitions, setRepetitions] = useState(1)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+
+  const refresh = useCallback(async () => {
+    try {
+      const [d, h] = await Promise.all([api.benchmarkDatasets(), api.benchmarks()])
+      setDatasets(d.datasets)
+      setHistory(h.benchmarks)
+      const current = d.datasets.find((x) => x.name === dataset)
+      if (!current && d.datasets.length) setDataset(d.datasets[0].name)
+      setError('')
+    } catch (e: any) {
+      setError(e.message || 'Unable to load benchmark suite. Start the backend and check the manifest.')
+    }
+  }, [dataset])
+
+  useEffect(() => {
+    refresh()
+  }, [refresh])
+
+  useEffect(() => {
+    let alive = true
+    api.benchmarkTasks(dataset)
+      .then((value) => {
+        if (alive) setTasks(value.tasks)
+      })
+      .catch((e: any) => {
+        if (alive) setError(e.message)
+      })
+    return () => {
+      alive = false
+    }
+  }, [dataset])
+
+  useEffect(() => {
+    if (!selected || !['queued', 'running'].includes(selected.status)) return
+    let alive = true
+    const poll = async () => {
+      try {
+        const latest = await api.benchmark(selected.id)
+        if (!alive) return
+        setSelected(latest)
+        const list = await api.benchmarks()
+        if (alive) setHistory(list.benchmarks)
+      } catch (e: any) {
+        if (alive) setError(e.message)
+      }
+    }
+    poll()
+    const timer = setInterval(poll, 2000)
+    return () => {
+      alive = false
+      clearInterval(timer)
+    }
+  }, [selected?.id, selected?.status])
+
+  const start = async () => {
+    setBusy(true)
+    setError('')
+    try {
+      const created = await api.startBenchmark(repetitions, dataset)
+      const run = await api.benchmark(created.id)
+      setSelected(run)
+      await refresh()
+    } catch (e: any) {
+      setError(e.message || 'Could not start benchmark. Confirm all benchmark repositories are available.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const open = async (id: string) => {
+    try {
+      setSelected(await api.benchmark(id))
+      setError('')
+    } catch (e: any) {
+      setError(e.message)
+    }
+  }
+
+  const cancel = async () => {
+    if (!selected) return
+    try {
+      await api.cancelBenchmark(selected.id)
+      setSelected(await api.benchmark(selected.id))
+    } catch (e: any) {
+      setError(e.message)
+    }
+  }
+
+  const summary = selected?.summary || {}
+  const fmt = (n: any) => (n == null ? '—' : Number(n).toLocaleString())
+
+  return (
+    <>
+      <PageHeader
+        eyebrow="Repeatable engineering checks"
+        title="Benchmark suite"
+        description="Run the same fixed task set against the configured harness. Scores come from actual repository runs, test results, and reviewer gates."
+        action={
+          <Button
+            onClick={start}
+            disabled={busy || tasks.length === 0 || (!!selected && ['queued', 'running'].includes(selected.status))}
+          >
+            ▶ {busy ? 'Starting…' : 'Run benchmark'}
+          </Button>
+        }
+      />
+
+      {error && (
+        <div className="error-banner">
+          <CircleDot size={16} />
+          <span>{error}</span>
+          <button onClick={refresh}>Retry</button>
+        </div>
+      )}
+
+      <div className="c" style={{ marginBottom: 20 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 16 }}>
+          <div>
+            <h2>Default task set</h2>
+            <div className="sb">{tasks.length} tasks · each sample runs in a disposable clone</div>
+          </div>
+          <div style={{ display: 'flex', gap: 14, alignItems: 'center' }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 14 }}>
+              Dataset
+              <select className="in" style={{ width: 'auto', padding: '8px 14px' }} value={dataset} onChange={(e) => setDataset(e.target.value)}>
+                {datasets.map((d) => (
+                  <option key={d.name} value={d.name}>
+                    {d.name} ({d.task_count ?? 'invalid'})
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 14 }}>
+              Repetitions
+              <select className="in" style={{ width: 'auto', padding: '8px 14px' }} value={repetitions} onChange={(e) => setRepetitions(Number(e.target.value))}>
+                <option value={1}>1×</option>
+                <option value={2}>2×</option>
+                <option value={3}>3×</option>
+                <option value={5}>5×</option>
+              </select>
+            </label>
+
+            <button className="bt secondary sm" onClick={refresh}>
+              <RefreshCw size={14} /> Refresh
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div className="gr e2">
+        {tasks.map((t) => (
+          <div className="c" key={t.id} style={{ padding: 20 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+              <span className="pl">{t.category}</span>
+              <span className="mono" style={{ fontSize: 12, color: 'rgba(255,255,255,0.6)' }}>{t.id}</span>
+            </div>
+            <p style={{ fontWeight: 700, margin: '12px 0 14px', fontSize: 15, lineHeight: 1.4 }}>
+              {t.expected_behavior || t.input}
+            </p>
+            <div className="in mono" style={{ fontSize: 13, background: 'rgba(0,0,0,0.6)', padding: '10px 14px' }}>
+              {t.test_command}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {selected && (
+        <div style={{ marginTop: 32 }}>
+          <div className="c" style={{ marginBottom: 20 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                  <h2>Benchmark Run {selected.id}</h2>
+                  <StatusPill status={selected.status === 'completed' ? (summary.failed_samples === 0 ? 'succeeded' : 'failed') : selected.status} />
+                </div>
+                <div className="sb" style={{ marginTop: 4 }}>
+                  {selected.completed_samples}/{selected.planned_samples} samples completed · {selected.model}
+                </div>
+              </div>
+              {['queued', 'running'].includes(selected.status) && (
+                <button className="bt danger sm" onClick={cancel}>
+                  Cancel benchmark
+                </button>
+              )}
+            </div>
+          </div>
+
+          <div className="gr c4" style={{ marginBottom: 20 }}>
+            <StatCard label="Success rate" value={summary.success_rate_percent == null ? '—' : `${summary.success_rate_percent}%`} detail={`${fmt(summary.successful_samples)} / ${fmt(summary.attempted_samples)} samples`} />
+            <StatCard label="Avg duration" value={formatDuration(summary.average_duration_ms)} detail={`p95 ${formatDuration(summary.p95_duration_ms)}`} />
+            <StatCard label="Total tokens" value={fmt(summary.total_tokens)} detail={`${fmt(summary.total_llm_calls)} model calls`} />
+            <StatCard label="Test pass count" value={fmt(summary.test_pass_count)} detail={`${fmt(summary.review_approval_count)} reviews approved`} />
+          </div>
+
+          <div className="c">
+            <h2>Sample-level results</h2>
+            {selected.results?.length ? (
+              <table style={{ marginTop: 14 }}>
+                <thead>
+                  <tr>
+                    <th>Task</th>
+                    <th>Rep</th>
+                    <th>Status</th>
+                    <th>Tests</th>
+                    <th>Review</th>
+                    <th>Duration</th>
+                    <th>Tokens</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {selected.results.map((r, i) => (
+                    <tr key={`${r.task_id}-${r.repetition}-${i}`}>
+                      <td>
+                        <strong>{r.task_id}</strong>
+                        <div className="sb">{r.repository}</div>
+                      </td>
+                      <td>{r.repetition}</td>
+                      <td>
+                        <StatusPill status={r.success ? 'succeeded' : r.status} />
+                      </td>
+                      <td>{r.test_passed ? 'Passed' : 'Not passed'}</td>
+                      <td>{r.review_approved ? 'Approved' : 'Not approved'}</td>
+                      <td>{formatDuration(r.duration_ms)}</td>
+                      <td>{fmt(r.total_tokens)}</td>
+                      <td>
+                        <button
+                          className="bt secondary sm"
+                          onClick={() => {
+                            window.dispatchEvent(new CustomEvent('agentharness:open-run', { detail: { id: r.run_id } }))
+                          }}
+                        >
+                          Inspect <ArrowRight size={12} />
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : (
+              <EmptyState title="Waiting for benchmark samples" body="The sample table will populate as each run completes." />
+            )}
+          </div>
+        </div>
+      )}
+
+      <div className="c" style={{ marginTop: 24 }}>
+        <h2>Previous benchmark runs</h2>
+        {history.length ? (
+          <table style={{ marginTop: 14 }}>
+            <thead>
+              <tr>
+                <th>Benchmark</th>
+                <th>Status</th>
+                <th>Progress</th>
+                <th>Success rate</th>
+                <th>Created</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {history.map((h) => (
+                <tr key={h.id}>
+                  <td>
+                    <strong>{h.id}</strong>
+                    <div className="sb">{h.model}</div>
+                  </td>
+                  <td>
+                    <StatusPill status={h.status} />
+                  </td>
+                  <td>
+                    {h.completed_samples}/{h.planned_samples}
+                  </td>
+                  <td>{h.summary?.success_rate_percent == null ? '—' : `${h.summary.success_rate_percent}%`}</td>
+                  <td>{new Date(h.created_at).toLocaleString()}</td>
+                  <td>
+                    <button className="bt secondary sm" onClick={() => open(h.id)}>
+                      Open <ArrowRight size={12} />
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <EmptyState title="No benchmark history yet" body="Start a benchmark to create the first report." />
+        )}
+      </div>
+    </>
+  )
 }
 
-function RunEvaluation({repos,initialRepo,onCreated,onNavigate}:{repos:Repository[];initialRepo?:string;onCreated:(id:string)=>void;onNavigate?:(p:Page)=>void}){
- const [repository,setRepository]=useState(initialRepo||repos[0]?.name||'');const [task,setTask]=useState('Find and fix a reproducible bug. Add or update tests to verify the fix, then explain the changes.');const [testCommand,setTestCommand]=useState('auto');const [maxSteps,setMaxSteps]=useState(8);const [submitting,setSubmitting]=useState(false);const [error,setError]=useState('')
- useEffect(()=>{if(initialRepo)setRepository(initialRepo);else if(!repository&&repos.length)setRepository(repos[0].name)},[repos,repository,initialRepo])
- const submit=async()=>{setError('');if(!repository){setError('Register or clone a Git repository first.');return}if(task.trim().length<10){setError('Describe the task in at least 10 characters.');return}setSubmitting(true);try{const r=await api.createRun({repository,task:task.trim(),test_command:testCommand,max_agent_steps:maxSteps});onCreated(r.id)}catch(e:any){setError(e.message)}finally{setSubmitting(false)}}
- return <><PageHeader eyebrow="EXECUTION CONFIGURATION" title="Run an evaluation" description="Assign a real engineering task to the multi-agent team. The run uses a disposable clone of the selected Git repository."/><div className="form-layout"><section className="panel form-panel"><div className="form-section-title"><span className="step-index">01</span><div><h2>Task definition</h2><p>Describe the desired change and how to verify it.</p></div></div><label className="field-label">Repository</label><select className="field-control" value={repository} onChange={e=>setRepository(e.target.value)}>{repos.length===0&&<option value="">No repositories registered</option>}{repos.map(r=><option key={r.name} value={r.name}>{r.name} — {r.path}</option>)}</select>{repos.length===0&&<div className="field-hint">No repositories found in workspace. <button type="button" className="text-button" style={{display:'inline',cursor:'pointer',padding:0}} onClick={()=>onNavigate?.('repositories')}>Add or clone a repository <ArrowRight size={11}/></button></div>}<label className="field-label">Engineering task</label><textarea className="field-control task-textarea" value={task} onChange={e=>setTask(e.target.value)} placeholder="Describe the bug, feature, or refactor…"/><div className="field-hint">Be specific about expected behavior. Agents inspect the repository before editing.</div><div className="form-divider"/><div className="form-section-title"><span className="step-index">02</span><div><h2>Execution controls</h2><p>Set the verification strategy and tool-call budget.</p></div></div><label className="field-label">Test command</label><select className="field-control" value={testCommand} onChange={e=>setTestCommand(e.target.value)}><option value="auto">Auto-detect repository test runner</option><option value="pytest">pytest</option><option value="python -m pytest">python -m pytest</option><option value="npm test">npm test</option><option value="npm run test">npm run test</option><option value="cargo test">cargo test</option><option value="go test ./...">go test ./...</option><option value="mvn test">mvn test</option><option value="gradle test">gradle test</option></select><label className="field-label">Maximum tool steps per agent <b>{maxSteps}</b></label><input className="range-input" type="range" min="2" max="16" value={maxSteps} onChange={e=>setMaxSteps(Number(e.target.value))}/><div className="range-labels"><span>2 · Faster / smaller budget</span><span>16 · More investigation</span></div>{error&&<div className="inline-error">{error}</div>}<div className="form-actions"><span><ShieldCheck size={15}/> Runs inside a disposable local clone</span><Button onClick={submit} disabled={submitting||repos.length===0}>{submitting?'Starting…':'Start agent run'} <ArrowRight size={15}/></Button></div></section><aside className="panel run-sidebar"><div className="side-card-heading"><Layers3 size={17}/><h3>Agent workflow</h3></div>{[{n:'01',title:'Coordinator',desc:'Plans task and routes specialist review'},{n:'02',title:'Repository analyst',desc:'Inspects code and gathers evidence'},{n:'03',title:'Test scout',desc:'Finds test framework and regressions'},{n:'04',title:'Coding agent',desc:'Implements changes in isolated clone'},{n:'05',title:'Test & debug',desc:'Runs actual tests and diagnoses failures'},{n:'06',title:'Code reviewer',desc:'Reviews diff and verification evidence'}].map(a=><div className="workflow-item" key={a.n}><span>{a.n}</span><div><strong>{a.title}</strong><small>{a.desc}</small></div></div>)}<div className="note-box"><Zap size={15}/><span>Read-only discovery agents can run concurrently. Implementation, testing, and review follow dependency order.</span></div></aside></div></>
+function RunEvaluation({
+  repos,
+  initialRepo,
+  onCreated,
+  onNavigate,
+}: {
+  repos: Repository[]
+  initialRepo?: string
+  onCreated: (id: string) => void
+  onNavigate?: (p: Page) => void
+}) {
+  const [repository, setRepository] = useState(initialRepo || repos[0]?.name || '')
+  const [task, setTask] = useState('Find and fix a reproducible bug. Add or update tests to verify the fix, then explain the changes.')
+  const [testCommand, setTestCommand] = useState('auto')
+  const [maxSteps, setMaxSteps] = useState(8)
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    if (initialRepo) setRepository(initialRepo)
+    else if (!repository && repos.length) setRepository(repos[0].name)
+  }, [repos, repository, initialRepo])
+
+  const submit = async () => {
+    setError('')
+    if (!repository) {
+      setError('Register or clone a Git repository first.')
+      return
+    }
+    if (task.trim().length < 10) {
+      setError('Describe the task in at least 10 characters.')
+      return
+    }
+    setSubmitting(true)
+    try {
+      const r = await api.createRun({
+        repository,
+        task: task.trim(),
+        test_command: testCommand,
+        max_agent_steps: maxSteps,
+      })
+      onCreated(r.id)
+    } catch (e: any) {
+      setError(e.message)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <>
+      <PageHeader
+        eyebrow="New agent run"
+        title="Run evaluation"
+        description="Describe the change, set a budget, let six agents work in an isolated clone."
+      />
+
+      <div className="gr c2">
+        <div className="c">
+          <label className="fl" htmlFor="rp" style={{ marginTop: 0 }}>
+            Repository
+          </label>
+          <select
+            id="rp"
+            className="in"
+            value={repository}
+            onChange={(e) => setRepository(e.target.value)}
+          >
+            {repos.length === 0 && <option value="">No repositories registered</option>}
+            {repos.map((r) => (
+              <option key={r.name} value={r.name}>
+                {r.name} — {r.path}
+              </option>
+            ))}
+          </select>
+          {repos.length === 0 && (
+            <div className="sb" style={{ marginTop: 8 }}>
+              No repositories found.{' '}
+              <button
+                type="button"
+                style={{ background: 'transparent', border: 0, color: '#fff', textDecoration: 'underline', cursor: 'pointer' }}
+                onClick={() => onNavigate?.('repositories')}
+              >
+                Add or clone a repository
+              </button>
+            </div>
+          )}
+
+          <label className="fl" htmlFor="tk">
+            Engineering task
+          </label>
+          <textarea
+            id="tk"
+            className="in"
+            rows={4}
+            value={task}
+            onChange={(e) => setTask(e.target.value)}
+            placeholder="Describe the bug, feature, or refactor…"
+          />
+
+          <label className="fl" htmlFor="tc">
+            Test command
+          </label>
+          <select
+            id="tc"
+            className="in"
+            value={testCommand}
+            onChange={(e) => setTestCommand(e.target.value)}
+          >
+            <option value="auto">Auto-detect repository test runner</option>
+            <option value="pytest">pytest</option>
+            <option value="python -m pytest">python -m pytest</option>
+            <option value="npm test">npm test</option>
+            <option value="npm run test">npm run test</option>
+            <option value="cargo test">cargo test</option>
+            <option value="go test ./...">go test ./...</option>
+            <option value="mvn test">mvn test</option>
+            <option value="gradle test">gradle test</option>
+          </select>
+
+          <label className="fl">
+            Maximum tool steps per agent: <b>{maxSteps}</b>
+          </label>
+          <input
+            className="range-input"
+            type="range"
+            min="2"
+            max="16"
+            value={maxSteps}
+            onChange={(e) => setMaxSteps(Number(e.target.value))}
+          />
+          <div className="range-labels">
+            <span>2 · Fast budget</span>
+            <span>16 · Thorough investigation</span>
+          </div>
+
+          {error && <div className="inline-error">{error}</div>}
+
+          <div style={{ marginTop: 26, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span className="sb">
+              <ShieldCheck size={15} style={{ verticalAlign: 'middle', marginRight: 6 }} />
+              Disposable clone
+            </span>
+            <Button onClick={submit} disabled={submitting || repos.length === 0}>
+              {submitting ? 'Starting…' : 'Start agent run'} <ArrowRight size={15} />
+            </Button>
+          </div>
+        </div>
+
+        <div className="c">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
+            <Layers3 size={20} />
+            <h2>Agent workflow</h2>
+          </div>
+          {[
+            { n: '01', title: 'Coordinator', desc: 'Plans task and routes specialist review' },
+            { n: '02', title: 'Repository analyst', desc: 'Inspects code and gathers evidence' },
+            { n: '03', title: 'Test scout', desc: 'Finds test framework and regressions' },
+            { n: '04', title: 'Coding agent', desc: 'Implements changes in isolated clone' },
+            { n: '05', title: 'Test & debug', desc: 'Runs actual tests and diagnoses failures' },
+            { n: '06', title: 'Code reviewer', desc: 'Reviews diff and verification evidence' },
+          ].map((a) => (
+            <div className="workflow-item" key={a.n}>
+              <span>{a.n}</span>
+              <div>
+                <strong>{a.title}</strong>
+                <small>{a.desc}</small>
+              </div>
+            </div>
+          ))}
+          <div className="sb" style={{ marginTop: 18, borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: 14 }}>
+            <Zap size={14} style={{ verticalAlign: 'middle', marginRight: 6 }} />
+            Read-only discovery agents run concurrently. Implementation, testing, and review follow dependency order.
+          </div>
+        </div>
+      </div>
+    </>
+  )
 }
 
-function LiveExecution({run,events,onCancel,onRefresh}:{run:Run|null;events:EventItem[];onCancel:()=>void;onRefresh:()=>void}){
- const [tab,setTab]=useState<'timeline'|'agents'|'diff'|'metrics'>('timeline');const [detail,setDetail]=useState<EventItem|null>(null)
- useEffect(()=>{if(events.length&&!detail)setDetail(events[events.length-1])},[events])
- if(!run)return <><PageHeader eyebrow="LIVE OBSERVABILITY" title="Live execution inspector" description="Select a run from history or start a new evaluation to inspect real agent traces."/><EmptyState title="No run selected" body="Open an execution from Overview or Run history." action={<Button onClick={onRefresh}>Refresh runs</Button>}/></>
- const result=run.result||{};const isActive=run.status==='running'||run.status==='queued';
- return <><PageHeader eyebrow={`EXECUTION / ${run.id}`} title={run.repository} description={run.task} action={<div className="header-buttons">{isActive&&<Button kind="danger" onClick={onCancel}>Cancel run</Button>}<Button kind="secondary" onClick={onRefresh}><RefreshCw size={14}/> Refresh</Button></div>}/><div className="run-summary-bar"><StatusPill status={run.status}/><span><Clock3 size={14}/>{formatDuration(run.duration_ms)}</span><span><Zap size={14}/>{formatNumber(run.total_tokens)} tokens</span><span><Bot size={14}/>{formatNumber(run.llm_calls)} LLM calls</span><span><GitBranch size={14}/>{run.repository}</span></div>{run.error&&<div className="inline-error">{run.error}</div>}<div className="inspector-layout"><section className="panel inspector-main"><div className="tabs">{(['timeline','agents','diff','metrics'] as const).map(t=><button key={t} className={tab===t?'selected':''} onClick={()=>setTab(t)}>{t==='timeline'?'Event timeline':t==='agents'?'Agent outputs':t==='diff'?'Code diff':'Run metrics'}</button>)}</div>{tab==='timeline'&&<div className="timeline"><div className="timeline-track"/>{events.map(ev=><button className={`timeline-event ${detail?.id===ev.id?'selected':''}`} key={ev.id} onClick={()=>setDetail(ev)}><span className={`timeline-node ${ev.event_type.includes('error')?'bad':ev.event_type.includes('completed')||ev.event_type==='run_finished'?'good':''}`}/><div className="timeline-event-main"><div className="timeline-event-head"><strong>{ev.message}</strong><time>{new Date(ev.timestamp).toLocaleTimeString()}</time></div><div className="timeline-event-meta"><span>{ev.agent||'system'}</span><span>{ev.event_type}</span></div></div></button>)}</div>}{tab==='agents'&&<div className="agent-output-list">{Object.entries(result.agents||{}).map(([role,output]:any)=><details key={role} className="agent-output" open={role==='code_reviewer'}><summary><Bot size={15}/><strong>{role.replaceAll('_',' ')}</strong><span className="agent-summary-meta">{result.agent_metrics?.[role]?.calls ?? 0} calls · {formatNumber(result.agent_metrics?.[role]?.total_tokens)} tokens · {formatDuration(result.agent_metrics?.[role]?.duration_ms)}</span><ChevronRight size={15}/></summary><pre>{output}</pre></details>)}{!Object.keys(result.agents||{}).length&&<EmptyState title="Agent outputs will appear here" body="Outputs are available after each agent finishes."/>}</div>}{tab==='diff'&&<div className="diff-panel"><div className="diff-top"><FileCode2 size={15}/> Final working-tree diff</div>{result.diff?<pre className="code-diff">{result.diff}</pre>:<EmptyState title="No diff available yet" body="The code diff is populated after execution reaches review."/>}</div>}{tab==='metrics'&&<div className="run-metrics-grid">{Object.entries(run.metrics||{}).filter(([k,v])=>typeof v!=='object'&&v!==null).map(([k,v])=><div className="run-metric" key={k}><span>{k.replaceAll('_',' ')}</span><strong>{String(v)}</strong></div>)}</div>}</section><aside className="panel event-detail"><div className="panel-heading"><div><h2>Event detail</h2><p>{detail?`Event #${detail.id}`:'Select a timeline event'}</p></div></div>{detail?<><div className="detail-badge">{detail.event_type}</div><h3>{detail.message}</h3><div className="detail-line"><span>Timestamp</span><strong>{new Date(detail.timestamp).toLocaleString()}</strong></div><div className="detail-line"><span>Agent</span><strong>{detail.agent||'system'}</strong></div><div className="detail-json-title">Payload</div><pre className="detail-json">{JSON.stringify(detail.data,null,2)}</pre></>:<p className="muted">Select an event to inspect its structured payload.</p>}<div className="detail-divider"/><div className="panel-heading"><div><h2>Verification</h2><p>Recorded run outcomes</p></div></div>{result.verification_state&&<div className="verify-row"><span>State</span><strong className={result.verification_state==='PASS'?'text-green':'text-muted'}>{result.verification_state}</strong></div>}<div className="verify-row"><span>Tests passed</span><strong className={result.test_passed?'text-green':'text-muted'}>{result.test_passed?'Yes':run.status==='running'?'Pending':'No / unavailable'}</strong></div><div className="verify-row"><span>Review approved</span><strong className={result.review_approved?'text-green':'text-muted'}>{result.review_approved?'Yes':run.status==='running'?'Pending':'No'}</strong></div><div className="verify-row"><span>Changed files</span><strong>{formatNumber(result.changed_files?.length)}</strong></div></aside></div></>
+function LiveExecution({
+  run,
+  events,
+  onCancel,
+  onRefresh,
+}: {
+  run: Run | null
+  events: EventItem[]
+  onCancel: () => void
+  onRefresh: () => void
+}) {
+  const [tab, setTab] = useState<'timeline' | 'agents' | 'diff' | 'metrics'>('timeline')
+  const [detail, setDetail] = useState<EventItem | null>(null)
+
+  useEffect(() => {
+    if (events.length && !detail) setDetail(events[events.length - 1])
+  }, [events, detail])
+
+  if (!run) {
+    return (
+      <>
+        <PageHeader
+          eyebrow="Live observability"
+          title="Live execution inspector"
+          description="Select a run from history or start a new evaluation to inspect real agent traces."
+        />
+        <EmptyState
+          title="No run selected"
+          body="Open an execution from Overview or Run history."
+          action={<Button onClick={onRefresh}>Refresh runs</Button>}
+        />
+      </>
+    )
+  }
+
+  const result = run.result || {}
+  const isActive = run.status === 'running' || run.status === 'queued'
+
+  return (
+    <>
+      <PageHeader
+        eyebrow={`EXECUTION / #${run.id}`}
+        title={run.repository}
+        description={run.task}
+        action={
+          <div style={{ display: 'flex', gap: 12 }}>
+            {isActive && (
+              <Button kind="danger" onClick={onCancel}>
+                Cancel run
+              </Button>
+            )}
+            <Button kind="secondary" onClick={onRefresh}>
+              <RefreshCw size={14} /> Refresh
+            </Button>
+          </div>
+        }
+      />
+
+      <div
+        className="c"
+        style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          flexWrap: 'wrap',
+          gap: 16,
+          padding: '16px 24px',
+          marginBottom: 20,
+        }}
+      >
+        <StatusPill status={run.status} />
+        <span className="mono">
+          <Clock3 size={14} style={{ verticalAlign: 'middle', marginRight: 6 }} />
+          {formatDuration(run.duration_ms)}
+        </span>
+        <span className="mono">
+          <Zap size={14} style={{ verticalAlign: 'middle', marginRight: 6 }} />
+          {formatNumber(run.total_tokens)} tokens
+        </span>
+        <span className="mono">
+          <Bot size={14} style={{ verticalAlign: 'middle', marginRight: 6 }} />
+          {formatNumber(run.llm_calls)} model calls
+        </span>
+        <span className="mono">
+          <GitBranch size={14} style={{ verticalAlign: 'middle', marginRight: 6 }} />
+          {run.repository}
+        </span>
+      </div>
+
+      <div className="gr c2">
+        <div className="c">
+          <div style={{ display: 'flex', gap: 10, borderBottom: '1px solid rgba(255,255,255,0.12)', paddingBottom: 14, marginBottom: 18 }}>
+            {(['timeline', 'agents', 'diff', 'metrics'] as const).map((t) => (
+              <button
+                key={t}
+                className={`bt sm ${tab === t ? '' : 'secondary'}`}
+                onClick={() => setTab(t)}
+              >
+                {t === 'timeline' ? 'Event timeline' : t === 'agents' ? 'Agent outputs' : t === 'diff' ? 'Code diff' : 'Run metrics'}
+              </button>
+            ))}
+          </div>
+
+          {tab === 'timeline' && (
+            <div className="timeline">
+              {events.map((ev) => (
+                <button
+                  className={`timeline-event ${detail?.id === ev.id ? 'selected' : ''}`}
+                  key={ev.id}
+                  onClick={() => setDetail(ev)}
+                >
+                  <span
+                    className={`timeline-node ${
+                      ev.event_type.includes('error')
+                        ? 'bad'
+                        : ev.event_type.includes('completed') || ev.event_type === 'run_finished'
+                        ? 'good'
+                        : ''
+                    }`}
+                  />
+                  <div style={{ flex: 1 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+                      <strong style={{ fontSize: 14 }}>{ev.message}</strong>
+                      <span className="sb" style={{ fontSize: 12 }}>
+                        {new Date(ev.timestamp).toLocaleTimeString()}
+                      </span>
+                    </div>
+                    <div className="sb" style={{ fontSize: 12 }}>
+                      {ev.agent || 'system'} · {ev.event_type}
+                    </div>
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+
+          {tab === 'agents' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+              {Object.entries(result.agents || {}).map(([role, output]: any) => (
+                <details key={role} className="c" style={{ padding: 18 }} open={role === 'code_reviewer'}>
+                  <summary style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10, fontWeight: 700 }}>
+                    <Bot size={16} />
+                    <span>{role.replaceAll('_', ' ')}</span>
+                    <span className="sb" style={{ marginLeft: 'auto', fontSize: 12 }}>
+                      {result.agent_metrics?.[role]?.calls ?? 0} calls · {formatNumber(result.agent_metrics?.[role]?.total_tokens)} tokens
+                    </span>
+                  </summary>
+                  <pre className="code-diff" style={{ marginTop: 14 }}>{output}</pre>
+                </details>
+              ))}
+            </div>
+          )}
+
+          {tab === 'diff' && (
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12, fontWeight: 600 }}>
+                <FileCode2 size={16} /> Final working-tree diff
+              </div>
+              {result.diff ? (
+                <pre className="code-diff">{result.diff}</pre>
+              ) : (
+                <EmptyState title="No diff available yet" body="The code diff appears once the Coding Agent implements changes." />
+              )}
+            </div>
+          )}
+
+          {tab === 'metrics' && (
+            <div className="gr e2">
+              {Object.entries(run.metrics || {})
+                .filter(([_k, v]) => typeof v !== 'object' && v !== null)
+                .map(([k, v]) => (
+                  <div className="c" key={k} style={{ padding: 18 }}>
+                    <div className="lb">{k.replaceAll('_', ' ')}</div>
+                    <div className="nm" style={{ fontSize: 32 }}>{String(v)}</div>
+                  </div>
+                ))}
+            </div>
+          )}
+        </div>
+
+        <div className="c">
+          <h2>Event detail</h2>
+          {detail ? (
+            <div style={{ marginTop: 14 }}>
+              <span className="pl">{detail.event_type}</span>
+              <h3 style={{ margin: '14px 0 8px' }}>{detail.message}</h3>
+              <div className="rw">
+                <span className="lb">Timestamp</span>
+                <span className="mono" style={{ fontSize: 13 }}>{new Date(detail.timestamp).toLocaleString()}</span>
+              </div>
+              <div className="rw">
+                <span className="lb">Agent</span>
+                <span className="mono" style={{ fontSize: 13 }}>{detail.agent || 'system'}</span>
+              </div>
+              <div style={{ marginTop: 14, marginBottom: 6, fontSize: 13, fontWeight: 600, color: 'rgba(255,255,255,0.7)' }}>
+                Payload JSON
+              </div>
+              <pre className="code-diff" style={{ maxHeight: 220 }}>{JSON.stringify(detail.data, null, 2)}</pre>
+            </div>
+          ) : (
+            <p className="sb" style={{ marginTop: 14 }}>Select a timeline event to view details.</p>
+          )}
+
+          <div style={{ marginTop: 24, paddingTop: 18, borderTop: '1px solid rgba(255,255,255,0.12)' }}>
+            <h2>Verification Outcomes</h2>
+            {result.verification_state && (
+              <div className="rw">
+                <span className="lb">State</span>
+                <span className="pl">{result.verification_state}</span>
+              </div>
+            )}
+            <div className="rw">
+              <span className="lb">Tests passed</span>
+              <span className="mono">{result.test_passed ? 'Yes' : run.status === 'running' ? 'Pending' : 'No'}</span>
+            </div>
+            <div className="rw">
+              <span className="lb">Review approved</span>
+              <span className="mono">{result.review_approved ? 'Yes' : run.status === 'running' ? 'Pending' : 'No'}</span>
+            </div>
+            <div className="rw">
+              <span className="lb">Changed files</span>
+              <span className="mono">{formatNumber(result.changed_files?.length || 0)}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </>
+  )
 }
 
-function RunHistory({runs,onOpen,onNavigate}:{runs:Run[];onOpen:(id:string)=>void;onNavigate:(p:Page)=>void}){const [search,setSearch]=useState('');const [filter,setFilter]=useState('all');const filtered=runs.filter(r=>(filter==='all'||r.status===filter)&&`${r.repository} ${r.task} ${r.id}`.toLowerCase().includes(search.toLowerCase()));return <><PageHeader eyebrow="EXECUTION ARCHIVE" title="Run history" description="Browse prior executions, inspect traces, and revisit verification outcomes." action={<Button onClick={()=>onNavigate('run')}><Plus size={15}/> New run</Button>}/><div className="table-toolbar"><input className="search-field" value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search repository, task, or run ID…"/><select className="filter-select" value={filter} onChange={e=>setFilter(e.target.value)}><option value="all">All statuses</option><option value="succeeded">Succeeded</option><option value="failed">Failed</option><option value="running">Running</option><option value="queued">Queued</option></select><span className="muted">{filtered.length} runs</span></div><div className="panel table-panel">{filtered.length?<table><thead><tr><th>RUN / TASK</th><th>STATUS</th><th>DURATION</th><th>LLM TOKENS</th><th>MODEL CALLS</th><th></th></tr></thead><tbody>{filtered.map(r=><tr key={r.id} onClick={()=>onOpen(r.id)} className="clickable-row"><td><div className="run-name">{r.repository} <span>#{r.id}</span></div><div className="run-task">{r.task}</div><small>{new Date(r.created_at).toLocaleString()}</small></td><td><StatusPill status={r.status}/></td><td>{formatDuration(r.duration_ms)}</td><td>{formatNumber(r.total_tokens)}</td><td>{formatNumber(r.llm_calls)}</td><td><ChevronRight size={16}/></td></tr>)}</tbody></table>:<EmptyState title="No matching runs" body="Start an evaluation to build your run history." action={<Button onClick={()=>onNavigate('run')}>Start evaluation</Button>}/>}</div></>}
+function RunHistory({
+  runs,
+  onOpen,
+  onNavigate,
+}: {
+  runs: Run[]
+  onOpen: (id: string) => void
+  onNavigate: (p: Page) => void
+}) {
+  const [search, setSearch] = useState('')
+  const [filter, setFilter] = useState('all')
 
-function MetricsPage({metrics,runs,onNavigate}:{metrics:any;runs:Run[];onNavigate:(p:Page)=>void}){const completed=runs.filter(r=>r.status==='succeeded'||r.status==='failed');const data=completed.slice(0,20).reverse().map((r,i)=>({run:`${i+1}`,tokens:r.total_tokens||0,seconds:r.duration_ms?Math.round(r.duration_ms/1000):0,success:r.success?1:0}));return <><PageHeader eyebrow="ENGINEERING TELEMETRY" title="Metrics & reports" description="Operational metrics calculated from actual recorded runs. No sample or hardcoded execution results." action={<Button kind="secondary" onClick={()=>onNavigate('history')}>View run history <ArrowRight size={15}/></Button>}/><div className="stats-grid"><StatCard label="Verified success rate" value={metrics.success_rate==null?'—':`${metrics.success_rate}%`} detail={`${metrics.successful_runs||0} successful / ${metrics.completed_runs||0} completed`} icon={ShieldCheck} tone="green"/><StatCard label="Average wall-clock time" value={formatDuration(metrics.average_duration_ms)} detail={`p95 ${formatDuration(metrics.p95_duration_ms)}`} icon={Timer} tone="blue"/><StatCard label="Input tokens" value={formatNumber(metrics.prompt_tokens)} detail="Provider-reported prompt tokens" icon={ArrowDownRight} tone="violet"/><StatCard label="Output tokens" value={formatNumber(metrics.completion_tokens)} detail="Provider-reported completion tokens" icon={Zap} tone="amber"/></div><div className="overview-grid"><section className="panel chart-panel"><div className="panel-heading"><div><h2>Token use by completed run</h2><p>Most recent completed executions</p></div></div>{data.length?<div className="chart-wrap"><ResponsiveContainer width="100%" height="100%"><AreaChart data={data}><CartesianGrid strokeDasharray="3 4" stroke="#232a36" vertical={false}/><XAxis dataKey="run" tick={{fill:'#798497',fontSize:11}} axisLine={false} tickLine={false}/><YAxis tick={{fill:'#798497',fontSize:11}} axisLine={false} tickLine={false}/><Tooltip contentStyle={{background:'#141923',border:'1px solid #2b3444',borderRadius:10,color:'#eef2fa'}}/><Area dataKey="tokens" name="Total tokens" stroke="#a58bfa" fill="#a58bfa" fillOpacity={0.14}/></AreaChart></ResponsiveContainer></div>:<EmptyState title="Metrics appear after runs" body="Run tasks to collect provider-reported token and timing data." action={<Button onClick={()=>onNavigate('run')}>Run an evaluation</Button>}/>}</section><section className="panel"><div className="panel-heading"><div><h2>What these numbers mean</h2><p>Interpretation notes</p></div></div><div className="metric-explain"><strong>Verified success</strong><p>A run is marked successful only if a configured test command passes and the code reviewer explicitly approves the diff.</p></div><div className="metric-explain"><strong>Wall-clock time</strong><p>Includes orchestration, provider latency, tool execution, tests, and review.</p></div><div className="metric-explain"><strong>Token counts</strong><p>Reported by the model API. They can include repeated context and internal reasoning tokens if the provider includes them in usage.</p></div><div className="metric-explain"><strong>Important limitation</strong><p>Task success is a useful operational signal, not a guarantee of correctness. Inspect tests and diffs before using CV claims.</p></div></section></div><div className="note-box wide-note"><ShieldCheck size={16}/><span>CV numbers should be computed from a documented task set and include the number of runs, success criteria, and measurement method.</span></div></>}
+  const filtered = runs.filter(
+    (r) =>
+      (filter === 'all' || r.status === filter) &&
+      `${r.repository} ${r.task} ${r.id}`.toLowerCase().includes(search.toLowerCase())
+  )
 
-function RepositoriesPage({repos,root,onRegistered,onNavigate,onSelectRepoForRun}:{repos:Repository[];root:string;onRegistered:()=>void;onNavigate:(p:Page)=>void;onSelectRepoForRun:(r:string)=>void}){
-  const [tab, setTab] = useState<'github'|'zip'|'folder'>('github')
+  return (
+    <>
+      <PageHeader
+        eyebrow="Execution archive"
+        title="Run history"
+        description="Browse prior executions, inspect traces, and revisit verification outcomes."
+        action={
+          <Button onClick={() => onNavigate('run')}>
+            <Plus size={15} /> New run
+          </Button>
+        }
+      />
+
+      <div className="c" style={{ padding: '14px 20px', marginBottom: 20 }}>
+        <div style={{ display: 'flex', gap: 14, alignItems: 'center', flexWrap: 'wrap' }}>
+          <input
+            className="in"
+            style={{ flex: 1, minWidth: 260, padding: '10px 16px' }}
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search repository, task, or run ID…"
+          />
+          <select
+            className="in"
+            style={{ width: 'auto', padding: '10px 16px' }}
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+          >
+            <option value="all">All statuses</option>
+            <option value="succeeded">Succeeded</option>
+            <option value="failed">Failed</option>
+            <option value="running">Running</option>
+            <option value="queued">Queued</option>
+          </select>
+          <span className="mono" style={{ fontSize: 13, color: 'rgba(255,255,255,0.6)' }}>
+            {filtered.length} runs
+          </span>
+        </div>
+      </div>
+
+      <div className="gr" style={{ gap: 14 }}>
+        {filtered.length ? (
+          filtered.map((r) => (
+            <div
+              className="c clickable-row"
+              key={r.id}
+              onClick={() => onOpen(r.id)}
+              style={{
+                display: 'grid',
+                gridTemplateColumns: '2.6fr 1fr 1fr 1fr',
+                gap: 12,
+                alignItems: 'center',
+                padding: '20px 26px',
+              }}
+            >
+              <div>
+                <strong>{r.repository}</strong> <span className="sb">#{r.id}</span>
+                <div className="sb" style={{ margin: '6px 0' }}>
+                  {r.task.slice(0, 72)}...
+                </div>
+                <div className="sb" style={{ fontSize: 12 }}>
+                  {new Date(r.created_at).toLocaleString()}
+                </div>
+              </div>
+              <span className="pl" style={{ justifySelf: 'start' }}>
+                <StatusPill status={r.status} />
+              </span>
+              <span className="mono" style={{ fontSize: 14 }}>
+                {formatDuration(r.duration_ms)}
+              </span>
+              <span className="mono" style={{ fontSize: 13, color: 'rgba(255,255,255,0.7)' }}>
+                {formatNumber(r.total_tokens)} tokens · {r.llm_calls} calls
+              </span>
+            </div>
+          ))
+        ) : (
+          <EmptyState
+            title="No matching runs"
+            body="Start an evaluation to build your run history."
+            action={<Button onClick={() => onNavigate('run')}>Start evaluation</Button>}
+          />
+        )}
+      </div>
+    </>
+  )
+}
+
+function MetricsPage({
+  metrics,
+  runs,
+  onNavigate,
+}: {
+  metrics: any
+  runs: Run[]
+  onNavigate: (p: Page) => void
+}) {
+  const completed = runs.filter((r) => r.status === 'succeeded' || r.status === 'failed')
+  const data = completed
+    .slice(0, 20)
+    .reverse()
+    .map((r, i) => ({
+      run: `#${i + 1}`,
+      tokens: r.total_tokens || 0,
+      seconds: r.duration_ms ? Math.round(r.duration_ms / 1000) : 0,
+    }))
+
+  return (
+    <>
+      <PageHeader
+        eyebrow="Engineering telemetry"
+        title="Metrics & reports"
+        description="Operational metrics calculated from actual recorded runs."
+        action={
+          <Button kind="secondary" onClick={() => onNavigate('history')}>
+            View run history <ArrowRight size={15} />
+          </Button>
+        }
+      />
+
+      <div className="gr c4">
+        <StatCard
+          label="Verified success rate"
+          value={metrics.success_rate == null ? '0%' : `${metrics.success_rate}%`}
+          detail={`${metrics.successful_runs || 0} successful / ${metrics.completed_runs || 0} completed`}
+        />
+        <StatCard
+          label="Avg wall-clock time"
+          value={formatDuration(metrics.average_duration_ms)}
+          detail={`p95 ${formatDuration(metrics.p95_duration_ms)}`}
+        />
+        <StatCard
+          label="Input tokens"
+          value={formatNumber(metrics.prompt_tokens || 0)}
+          detail="Provider-reported prompt tokens"
+        />
+        <StatCard
+          label="Output tokens"
+          value={formatNumber(metrics.completion_tokens || 0)}
+          detail="Provider-reported completion tokens"
+        />
+      </div>
+
+      <div className="c" style={{ marginTop: 24 }}>
+        <h2>Token use by completed run</h2>
+        <div className="sb">Recent completed executions</div>
+        {data.length ? (
+          <div className="chart-wrap" style={{ height: 260 }}>
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={data} margin={{ top: 12, right: 12, left: -10, bottom: 0 }}>
+                <defs>
+                  <linearGradient id="tokenGrad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#ffffff" stopOpacity={0.3} />
+                    <stop offset="100%" stopColor="#ffffff" stopOpacity={0.01} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="4 6" stroke="rgba(255,255,255,.12)" vertical={false} />
+                <XAxis dataKey="run" tick={{ fill: 'rgba(255,255,255,.6)', fontSize: 12, fontFamily: 'JetBrains Mono' }} axisLine={false} tickLine={false} />
+                <YAxis tick={{ fill: 'rgba(255,255,255,.6)', fontSize: 12, fontFamily: 'JetBrains Mono' }} axisLine={false} tickLine={false} />
+                <Tooltip
+                  contentStyle={{
+                    background: '#0d0d0d',
+                    border: '1px solid rgba(255,255,255,0.2)',
+                    borderRadius: 14,
+                    color: '#ffffff',
+                    fontFamily: 'Space Grotesk',
+                  }}
+                />
+                <Area type="monotone" dataKey="tokens" name="Total tokens" stroke="#ffffff" strokeWidth={2.5} fill="url(#tokenGrad)" />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+        ) : (
+          <EmptyState title="Metrics appear after runs" body="Run tasks to collect provider token data." />
+        )}
+      </div>
+
+      <div className="gr e2" style={{ marginTop: 24 }}>
+        <div className="c" style={{ padding: 22 }}>
+          <b>Verified success</b>
+          <p className="sb" style={{ margin: '8px 0 0' }}>
+            A run is marked successful only if a configured test command passes and the code reviewer explicitly approves the diff.
+          </p>
+        </div>
+        <div className="c" style={{ padding: 22 }}>
+          <b>Wall-clock time</b>
+          <p className="sb" style={{ margin: '8px 0 0' }}>
+            Includes orchestration, provider latency, tool execution, tests, and review.
+          </p>
+        </div>
+        <div className="c" style={{ padding: 22 }}>
+          <b>Token counts</b>
+          <p className="sb" style={{ margin: '8px 0 0' }}>
+            Reported by the model API; can include repeated context and internal reasoning tokens.
+          </p>
+        </div>
+        <div className="c" style={{ padding: 22 }}>
+          <b>Important limitation</b>
+          <p className="sb" style={{ margin: '8px 0 0' }}>
+            Task success is a useful operational signal, not a guarantee of correctness.
+          </p>
+        </div>
+      </div>
+    </>
+  )
+}
+
+function RepositoriesPage({
+  repos,
+  root,
+  onRegistered,
+  onNavigate,
+  onSelectRepoForRun,
+}: {
+  repos: Repository[]
+  root: string
+  onRegistered: () => void
+  onNavigate: (p: Page) => void
+  onSelectRepoForRun: (r: string) => void
+}) {
+  const [tab, setTab] = useState<'github' | 'zip' | 'folder'>('github')
   const [gitUrl, setGitUrl] = useState('')
   const [gitBranch, setGitBranch] = useState('')
   const [gitName, setGitName] = useState('')
 
-  const [zipFile, setZipFile] = useState<File|null>(null)
+  const [zipFile, setZipFile] = useState<File | null>(null)
   const [zipName, setZipName] = useState('')
 
   const [folderPath, setFolderPath] = useState('')
@@ -104,53 +1425,83 @@ function RepositoriesPage({repos,root,onRegistered,onNavigate,onSelectRepoForRun
   const [busyMsg, setBusyMsg] = useState('')
 
   const handleClone = async () => {
-    if (!gitUrl.trim()) { setError('Enter a valid GitHub or Git repository URL.'); return }
-    setError(''); setSuccess(''); setBusy(true); setBusyMsg('Cloning repository from Git...')
+    if (!gitUrl.trim()) {
+      setError('Enter a valid GitHub or Git repository URL.')
+      return
+    }
+    setError('')
+    setSuccess('')
+    setBusy(true)
+    setBusyMsg('Cloning repository from Git...')
     try {
-      const res = await api.cloneRepository(gitUrl.trim(), gitName.trim() || undefined, gitBranch.trim() || undefined)
-      setGitUrl(''); setGitBranch(''); setGitName('')
+      const res = await api.cloneRepository(
+        gitUrl.trim(),
+        gitName.trim() || undefined,
+        gitBranch.trim() || undefined
+      )
+      setGitUrl('')
+      setGitBranch('')
+      setGitName('')
       setSuccess(`Repository '${res.repository.name}' cloned successfully!`)
       onRegistered()
     } catch (e: any) {
       setError(e.message)
     } finally {
-      setBusy(false); setBusyMsg('')
+      setBusy(false)
+      setBusyMsg('')
     }
   }
 
   const handleUploadZip = async () => {
-    if (!zipFile) { setError('Select a .zip archive to upload.'); return }
-    setError(''); setSuccess(''); setBusy(true); setBusyMsg('Uploading and extracting zip archive...')
+    if (!zipFile) {
+      setError('Select a .zip archive to upload.')
+      return
+    }
+    setError('')
+    setSuccess('')
+    setBusy(true)
+    setBusyMsg('Uploading and extracting zip archive...')
     try {
       const res = await api.uploadZip(zipFile, zipName.trim() || undefined)
-      setZipFile(null); setZipName('')
+      setZipFile(null)
+      setZipName('')
       setSuccess(`Repository '${res.repository.name}' imported successfully from zip!`)
       onRegistered()
     } catch (e: any) {
       setError(e.message)
     } finally {
-      setBusy(false); setBusyMsg('')
+      setBusy(false)
+      setBusyMsg('')
     }
   }
 
   const handleImportFolder = async () => {
-    if (!folderPath.trim()) { setError('Enter the path to a local directory.'); return }
-    setError(''); setSuccess(''); setBusy(true); setBusyMsg('Importing and initializing folder...')
+    if (!folderPath.trim()) {
+      setError('Enter the path to a local directory.')
+      return
+    }
+    setError('')
+    setSuccess('')
+    setBusy(true)
+    setBusyMsg('Importing and initializing folder...')
     try {
       const res = await api.importFolder(folderPath.trim(), folderName.trim() || undefined)
-      setFolderPath(''); setFolderName('')
+      setFolderPath('')
+      setFolderName('')
       setSuccess(`Repository '${res.repository.name}' imported successfully!`)
       onRegistered()
     } catch (e: any) {
       setError(e.message)
     } finally {
-      setBusy(false); setBusyMsg('')
+      setBusy(false)
+      setBusyMsg('')
     }
   }
 
   const handleDelete = async (name: string) => {
     if (!confirm(`Are you sure you want to remove '${name}' from workspace repositories?`)) return
-    setError(''); setSuccess('')
+    setError('')
+    setSuccess('')
     try {
       await api.deleteRepository(name)
       setSuccess(`Repository '${name}' removed.`)
@@ -160,186 +1511,377 @@ function RepositoriesPage({repos,root,onRegistered,onNavigate,onSelectRepoForRun
     }
   }
 
-  return <>
-    <PageHeader
-      eyebrow="LOCAL WORKSPACES"
-      title="Repositories"
-      description="Add GitHub repositories by link, upload .zip project archives, or import local folders. Each project gets an isolated Git baseline for automated evaluations."
-    />
-    <div className="repository-layout">
-      <section className="panel">
-        <div className="panel-heading">
-          <div>
-            <h2>Available Repositories</h2>
-            <p>{repos.length} ready for evaluation</p>
-          </div>
-          <GitBranch size={17}/>
+  return (
+    <>
+      <PageHeader
+        eyebrow="Local workspaces"
+        title="Repositories"
+        description="Add GitHub repositories by link, upload .zip project archives, or import local folders. Each project gets an isolated Git baseline for automated evaluations."
+      />
+
+      {success && (
+        <div className="success-banner">
+          <CheckCircle2 size={16} />
+          <span>{success}</span>
         </div>
-        {success && <div className="success-banner"><CheckCircle2 size={16}/><span>{success}</span></div>}
-        {repos.length ? (
-          <div className="repo-list">
-            {repos.map(r => (
-              <div className="repo-row" key={r.path}>
-                <div className="repo-icon"><GitBranch size={17}/></div>
-                <div className="repo-info">
-                  <strong>{r.name}</strong>
-                  <span>{r.path}</span>
+      )}
+
+      <div className="gr c2">
+        <div className="c">
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+            <div>
+              <h2>Available Repositories</h2>
+              <div className="sb">{repos.length} ready for evaluation</div>
+            </div>
+            <GitBranch size={20} />
+          </div>
+
+          {repos.length ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {repos.map((r) => (
+                <div className="rw" key={r.path} style={{ padding: '14px 16px', background: 'rgba(255,255,255,0.03)', borderRadius: 16 }}>
+                  <div>
+                    <strong style={{ fontSize: 16 }}>{r.name}</strong>
+                    <div className="sb" style={{ fontSize: 12, marginTop: 4 }}>{r.path}</div>
+                  </div>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <button
+                      className="bt sm"
+                      onClick={() => {
+                        onSelectRepoForRun(r.name)
+                        onNavigate('run')
+                      }}
+                      title="Run evaluation on this repository"
+                    >
+                      <Play size={12} /> Run
+                    </button>
+                    <button
+                      className="bt danger sm"
+                      onClick={() => handleDelete(r.name)}
+                      title="Remove repository"
+                    >
+                      <Trash2 size={12} />
+                    </button>
+                  </div>
                 </div>
-                <div className="repo-actions">
-                  <button className="repo-btn" onClick={() => { onSelectRepoForRun(r.name); onNavigate('run') }} title="Run evaluation on this repository">
-                    <Play size={12}/> Run evaluation
-                  </button>
-                  <button className="repo-btn danger" onClick={() => handleDelete(r.name)} title="Remove repository">
-                    <Trash2 size={12}/>
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <EmptyState
-            title="No repositories found"
-            body="Use the panel on the right to clone a GitHub repo, upload a .zip, or import a folder."
-          />
-        )}
-      </section>
-
-      <section className="panel add-repo-panel">
-        <div className="side-card-heading">
-          <Plus size={17}/>
-          <h3>Add a repository</h3>
-        </div>
-        <p className="muted">Choose how you want to add code to the evaluation workspace.</p>
-
-        <div className="repo-tabs">
-          <button className={`repo-tab ${tab==='github'?'active':''}`} onClick={() => { setTab('github'); setError('') }}>
-            <Globe size={13}/> GitHub link
-          </button>
-          <button className={`repo-tab ${tab==='zip'?'active':''}`} onClick={() => { setTab('zip'); setError('') }}>
-            <FileArchive size={13}/> Upload .ZIP
-          </button>
-          <button className={`repo-tab ${tab==='folder'?'active':''}`} onClick={() => { setTab('folder'); setError('') }}>
-            <FolderPlus size={13}/> Local folder
-          </button>
+              ))}
+            </div>
+          ) : (
+            <EmptyState
+              title="No repositories found"
+              body="Use the panel on the right to clone a GitHub repo, upload a .zip, or import a folder."
+            />
+          )}
         </div>
 
-        {tab === 'github' && (
-          <div>
-            <label className="field-label">GitHub or Git repository URL</label>
-            <input
-              className="field-control"
-              value={gitUrl}
-              onChange={e => setGitUrl(e.target.value)}
-              placeholder="https://github.com/owner/repository"
-              disabled={busy}
-            />
-            <label className="field-label">Branch / Tag (optional)</label>
-            <input
-              className="field-control"
-              value={gitBranch}
-              onChange={e => setGitBranch(e.target.value)}
-              placeholder="main, master, v1.0 (default branch if blank)"
-              disabled={busy}
-            />
-            <label className="field-label">Custom name (optional)</label>
-            <input
-              className="field-control"
-              value={gitName}
-              onChange={e => setGitName(e.target.value)}
-              placeholder="my-custom-repo-name"
-              disabled={busy}
-            />
-            {error && <div className="inline-error">{error}</div>}
-            <Button onClick={handleClone} disabled={busy || !gitUrl.trim()}>
-              {busy ? (busyMsg || 'Cloning...') : 'Clone repository'} <ArrowRight size={15}/>
-            </Button>
-          </div>
-        )}
+        <div className="c">
+          <h2>Add Repository</h2>
+          <div className="sb" style={{ marginBottom: 16 }}>Choose how you'd like to import your repository</div>
 
-        {tab === 'zip' && (
-          <div>
-            <label className="field-label">Select .zip project archive</label>
-            <label className="file-dropzone">
+          <div className="repo-tabs">
+            <button
+              className={`repo-tab ${tab === 'github' ? 'active' : ''}`}
+              onClick={() => {
+                setTab('github')
+                setError('')
+              }}
+            >
+              <GitBranch size={13} /> GitHub Link
+            </button>
+            <button
+              className={`repo-tab ${tab === 'zip' ? 'active' : ''}`}
+              onClick={() => {
+                setTab('zip')
+                setError('')
+              }}
+            >
+              <FileArchive size={13} /> Upload .ZIP
+            </button>
+            <button
+              className={`repo-tab ${tab === 'folder' ? 'active' : ''}`}
+              onClick={() => {
+                setTab('folder')
+                setError('')
+              }}
+            >
+              <FolderPlus size={13} /> Local folder
+            </button>
+          </div>
+
+          {tab === 'github' && (
+            <div>
+              <label className="fl" style={{ marginTop: 0 }}>GitHub or Git repository URL</label>
               <input
-                type="file"
-                accept=".zip"
-                style={{ display: 'none' }}
-                onChange={e => {
-                  if (e.target.files?.[0]) {
-                    setZipFile(e.target.files[0])
-                    setError('')
-                  }
-                }}
+                className="in"
+                value={gitUrl}
+                onChange={(e) => setGitUrl(e.target.value)}
+                placeholder="https://github.com/owner/repository"
                 disabled={busy}
               />
-              <div className="file-dropzone-icon"><UploadCloud size={20}/></div>
-              <strong>{zipFile ? 'Click to change file' : 'Click or drop .zip file here'}</strong>
-              <span>Supports GitHub repo zip exports and source archives up to 250MB</span>
-            </label>
-            {zipFile && (
-              <div className="file-selected">
-                <FileArchive size={16}/>
-                <strong>{zipFile.name}</strong>
-                <small>{(zipFile.size / 1024 / 1024).toFixed(2)} MB</small>
+              <label className="fl">Branch / Tag (optional)</label>
+              <input
+                className="in"
+                value={gitBranch}
+                onChange={(e) => setGitBranch(e.target.value)}
+                placeholder="main, master, v1.0 (default branch if blank)"
+                disabled={busy}
+              />
+              <label className="fl">Custom name (optional)</label>
+              <input
+                className="in"
+                value={gitName}
+                onChange={(e) => setGitName(e.target.value)}
+                placeholder="my-custom-repo-name"
+                disabled={busy}
+              />
+              {error && <div className="inline-error">{error}</div>}
+              <div style={{ marginTop: 20 }}>
+                <Button onClick={handleClone} disabled={busy || !gitUrl.trim()}>
+                  {busy ? busyMsg || 'Cloning...' : 'Clone repository'} <ArrowRight size={15} />
+                </Button>
               </div>
-            )}
-            <label className="field-label">Custom repository name (optional)</label>
-            <input
-              className="field-control"
-              value={zipName}
-              onChange={e => setZipName(e.target.value)}
-              placeholder="e.g. my-extracted-project"
-              disabled={busy}
-            />
-            {error && <div className="inline-error">{error}</div>}
-            <Button onClick={handleUploadZip} disabled={busy || !zipFile}>
-              {busy ? (busyMsg || 'Extracting...') : 'Upload & extract'} <ArrowRight size={15}/>
-            </Button>
-          </div>
-        )}
+            </div>
+          )}
 
-        {tab === 'folder' && (
-          <div>
-            <label className="field-label">Local folder path</label>
-            <input
-              className="field-control"
-              value={folderPath}
-              onChange={e => setFolderPath(e.target.value)}
-              placeholder="/Users/username/projects/my-app"
-              disabled={busy}
-            />
-            <div className="field-hint">Any directory on your computer. It will be safely copied and initialized with Git if needed.</div>
-            <label className="field-label">Custom name (optional)</label>
-            <input
-              className="field-control"
-              value={folderName}
-              onChange={e => setFolderName(e.target.value)}
-              placeholder="e.g. imported-app"
-              disabled={busy}
-            />
-            {error && <div className="inline-error">{error}</div>}
-            <Button onClick={handleImportFolder} disabled={busy || !folderPath.trim()}>
-              {busy ? (busyMsg || 'Importing...') : 'Import folder'} <ArrowRight size={15}/>
-            </Button>
-          </div>
-        )}
+          {tab === 'zip' && (
+            <div>
+              <label className="fl" style={{ marginTop: 0 }}>Select .zip project archive</label>
+              <label className="file-dropzone">
+                <input
+                  type="file"
+                  accept=".zip"
+                  style={{ display: 'none' }}
+                  onChange={(e) => {
+                    if (e.target.files?.[0]) {
+                      setZipFile(e.target.files[0])
+                      setError('')
+                    }
+                  }}
+                  disabled={busy}
+                />
+                <div style={{ margin: '0 auto 8px' }}>
+                  <UploadCloud size={24} />
+                </div>
+                <strong>{zipFile ? 'Click to change file' : 'Click or drop .zip file here'}</strong>
+                <div className="sb" style={{ fontSize: 12, marginTop: 4 }}>Supports GitHub zip exports up to 250MB</div>
+              </label>
 
-        <div className="note-box">
-          <ShieldCheck size={15}/>
-          <span>Repositories are automatically prepared with a Git baseline so the multi-agent runner can create clean isolated workspaces.</span>
+              {zipFile && (
+                <div className="file-selected">
+                  <FileArchive size={16} />
+                  <strong>{zipFile.name}</strong>
+                  <span className="sb" style={{ marginLeft: 'auto' }}>
+                    {(zipFile.size / 1024 / 1024).toFixed(2)} MB
+                  </span>
+                </div>
+              )}
+
+              <label className="fl">Custom repository name (optional)</label>
+              <input
+                className="in"
+                value={zipName}
+                onChange={(e) => setZipName(e.target.value)}
+                placeholder="e.g. my-extracted-project"
+                disabled={busy}
+              />
+              {error && <div className="inline-error">{error}</div>}
+              <div style={{ marginTop: 20 }}>
+                <Button onClick={handleUploadZip} disabled={busy || !zipFile}>
+                  {busy ? busyMsg || 'Extracting...' : 'Upload & extract'} <ArrowRight size={15} />
+                </Button>
+              </div>
+            </div>
+          )}
+
+          {tab === 'folder' && (
+            <div>
+              <label className="fl" style={{ marginTop: 0 }}>Local folder path</label>
+              <input
+                className="in"
+                value={folderPath}
+                onChange={(e) => setFolderPath(e.target.value)}
+                placeholder="/Users/username/projects/my-app"
+                disabled={busy}
+              />
+              <div className="sb" style={{ fontSize: 12, marginTop: 4 }}>
+                Any local directory. It will be copied and initialized with Git.
+              </div>
+
+              <label className="fl">Custom name (optional)</label>
+              <input
+                className="in"
+                value={folderName}
+                onChange={(e) => setFolderName(e.target.value)}
+                placeholder="e.g. imported-app"
+                disabled={busy}
+              />
+              {error && <div className="inline-error">{error}</div>}
+              <div style={{ marginTop: 20 }}>
+                <Button onClick={handleImportFolder} disabled={busy || !folderPath.trim()}>
+                  {busy ? busyMsg || 'Importing...' : 'Import folder'} <ArrowRight size={15} />
+                </Button>
+              </div>
+            </div>
+          )}
+
+          <div className="sb" style={{ marginTop: 24, borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: 14 }}>
+            <ShieldCheck size={15} style={{ verticalAlign: 'middle', marginRight: 6 }} />
+            Repositories are automatically prepared with a Git baseline for isolated runs.
+          </div>
         </div>
-      </section>
-    </div>
+      </div>
 
-    <div className="panel root-panel">
-      <div><HardDrive size={17}/><span>Workspace repositories storage directory</span></div>
-      <code>{root || 'Loading…'}</code>
-    </div>
-  </>
+      <div className="c" style={{ marginTop: 20, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <HardDrive size={18} />
+          <span>Workspace repositories storage directory</span>
+        </div>
+        <span className="mono" style={{ fontSize: 13, color: 'rgba(255,255,255,0.7)' }}>
+          {root || 'Loading…'}
+        </span>
+      </div>
+    </>
+  )
 }
 
-function ModelsPage({settings}:{settings:any}){return <><PageHeader eyebrow="INFERENCE CONFIGURATION" title="Ollama Cloud & model" description="The project uses one fixed model so performance metrics reflect harness behavior, not model comparisons."/><div className="model-hero panel"><div className="model-symbol"><Bot size={28}/></div><div className="model-info"><div className="model-tags"><span className="tag green-tag">Configured model</span><span className="tag">Cloud inference</span></div><h2>DeepSeek V4 Pro</h2><p>{settings.model||'deepseek-v4-pro:cloud'}</p><div className="model-meta"><span><span className="online-dot"/>{settings.api_key_configured?'API key configured':'API key missing'}</span><span><Layers3 size={14}/> Ollama Cloud OpenAI-compatible endpoint</span></div></div></div><div className="settings-grid"><div className="panel settings-card"><div className="settings-card-head"><Cpu size={17}/><h3>Provider</h3></div><div className="setting-row"><span>Base URL</span><code>{settings.base_url||'https://ollama.com/v1'}</code></div><div className="setting-row"><span>Model identifier</span><code>{settings.model||'deepseek-v4-pro:cloud'}</code></div><div className="setting-row"><span>API key</span><strong>{settings.api_key_configured?'Configured in backend/.env':'Not configured'}</strong></div></div><div className="panel settings-card"><div className="settings-card-head"><Gauge size={17}/><h3>Execution limits</h3></div><div className="setting-row"><span>Max agent tool steps</span><strong>{settings.max_agent_steps??'—'}</strong></div><div className="setting-row"><span>Concurrent read agents</span><strong>{settings.max_parallel_readers??'—'}</strong></div><div className="setting-row"><span>Test timeout</span><strong>{settings.test_timeout_seconds??'—'} s</strong></div></div></div><div className="note-box wide-note"><ShieldCheck size={16}/><span>Do not put provider keys in frontend environment variables. The backend reads OLLAMA_API_KEY from backend/.env and never returns the secret to the browser.</span></div></>}
+function ModelsPage({ settings }: { settings: any }) {
+  return (
+    <>
+      <PageHeader
+        eyebrow="Inference configuration"
+        title="Ollama & model"
+        description="The project uses one fixed model so performance metrics reflect harness behavior, not model comparisons."
+      />
 
-function SettingsPage({settings,onRefresh}:{settings:any;onRefresh:()=>void}){return <><PageHeader eyebrow="APPLICATION CONFIGURATION" title="Settings" description="Runtime configuration is read from backend/.env. Edit that file and restart the API to apply changes." action={<Button kind="secondary" onClick={onRefresh}><RefreshCw size={14}/> Refresh config</Button>}/><div className="settings-grid"><div className="panel settings-card"><div className="settings-card-head"><HardDrive size={17}/><h3>Local paths</h3></div><div className="setting-row stacked"><span>Repository root</span><code>{settings.repos_root||'Loading…'}</code></div><div className="setting-row stacked"><span>Run workspaces</span><code>{settings.runs_root||'Loading…'}</code></div></div><div className="panel settings-card"><div className="settings-card-head"><ShieldCheck size={17}/><h3>Safety defaults</h3></div><div className="setting-row"><span>Repository boundary</span><strong>Enforced</strong></div><div className="setting-row"><span>Allowed test commands</span><strong>Allowlist only</strong></div><div className="setting-row"><span>Disposable clone</span><strong>Enabled</strong></div><div className="setting-row"><span>Command timeout</span><strong>{settings.test_timeout_seconds||180}s</strong></div></div></div><section className="panel setup-note"><div className="setup-note-title"><Terminal size={17}/><h3>Configuration reference</h3></div><p>Copy <code>backend/.env.example</code> to <code>backend/.env</code>, set your Ollama Cloud API key, and adjust paths or limits if needed. Restart the FastAPI process after changing environment values.</p><pre>OLLAMA_API_KEY=your_key_here{`\n`}OLLAMA_MODEL=deepseek-v4-pro:cloud{`\n`}AGENTHARNESS_MAX_PARALLEL_READERS=2</pre></section></>}
+      <div className="c" style={{ marginBottom: 24 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+          <div className="lg" style={{ width: 44, height: 44 }} />
+          <div>
+            <div style={{ display: 'flex', gap: 10, marginBottom: 6 }}>
+              <span className="pl succeeded">Configured model</span>
+              <span className="pl">Cloud inference</span>
+            </div>
+            <h2>{settings.model || 'DeepSeek V4 Pro'}</h2>
+            <div className="sb" style={{ marginTop: 4 }}>
+              <span className="online-dot" style={{ marginRight: 6 }} />
+              {settings.api_key_configured ? 'API key configured' : 'API key missing'} · Ollama OpenAI-compatible endpoint
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="gr e2">
+        <div className="c">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
+            <Cpu size={18} />
+            <h2>Provider details</h2>
+          </div>
+          <div className="rw">
+            <span className="lb">Base URL</span>
+            <span className="mono" style={{ fontSize: 13 }}>{settings.base_url || 'https://ollama.com/v1'}</span>
+          </div>
+          <div className="rw">
+            <span className="lb">Model identifier</span>
+            <span className="mono" style={{ fontSize: 13 }}>{settings.model || 'deepseek-v4-pro:cloud'}</span>
+          </div>
+          <div className="rw">
+            <span className="lb">API key</span>
+            <span className="mono" style={{ fontSize: 13 }}>{settings.api_key_configured ? 'Configured in backend/.env' : 'Not configured'}</span>
+          </div>
+        </div>
+
+        <div className="c">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
+            <Zap size={18} />
+            <h2>Execution limits</h2>
+          </div>
+          <div className="rw">
+            <span className="lb">Max agent tool steps</span>
+            <span className="mono" style={{ fontSize: 13 }}>{settings.max_agent_steps ?? '—'}</span>
+          </div>
+          <div className="rw">
+            <span className="lb">Concurrent read agents</span>
+            <span className="mono" style={{ fontSize: 13 }}>{settings.max_parallel_readers ?? '—'}</span>
+          </div>
+          <div className="rw">
+            <span className="lb">Test timeout</span>
+            <span className="mono" style={{ fontSize: 13 }}>{settings.test_timeout_seconds ?? '—'} s</span>
+          </div>
+        </div>
+      </div>
+    </>
+  )
+}
+
+function SettingsPage({ settings, onRefresh }: { settings: any; onRefresh: () => void }) {
+  return (
+    <>
+      <PageHeader
+        eyebrow="Application configuration"
+        title="Settings"
+        description="Runtime configuration is read from backend/.env. Restart the API to apply changes."
+        action={
+          <Button kind="secondary" onClick={onRefresh}>
+            <RefreshCw size={14} /> Refresh config
+          </Button>
+        }
+      />
+
+      <div className="gr e2">
+        <div className="c">
+          <h2>Local paths</h2>
+          <div className="rw">
+            <span className="lb">Repository root</span>
+            <span className="mono" style={{ fontSize: 13 }}>{settings.repos_root || '…/workspace/repositories'}</span>
+          </div>
+          <div className="rw">
+            <span className="lb">Run workspaces</span>
+            <span className="mono" style={{ fontSize: 13 }}>{settings.runs_root || '…/workspace/runs'}</span>
+          </div>
+        </div>
+
+        <div className="c">
+          <h2>Safety defaults</h2>
+          <div className="rw">
+            <span className="lb">Repository boundary</span>
+            <span className="mono" style={{ fontSize: 13 }}>Enforced</span>
+          </div>
+          <div className="rw">
+            <span className="lb">Allowed test commands</span>
+            <span className="mono" style={{ fontSize: 13 }}>Allowlist only</span>
+          </div>
+          <div className="rw">
+            <span className="lb">Disposable clone</span>
+            <span className="mono" style={{ fontSize: 13 }}>Enabled</span>
+          </div>
+          <div className="rw">
+            <span className="lb">Command timeout</span>
+            <span className="mono" style={{ fontSize: 13 }}>{settings.test_timeout_seconds || 180}s</span>
+          </div>
+        </div>
+      </div>
+
+      <div
+        className="c mono"
+        style={{
+          marginTop: 20,
+          fontSize: 13,
+          lineHeight: 1.8,
+          padding: '20px 26px',
+          background: 'rgba(0,0,0,0.5)',
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10, color: 'rgba(255,255,255,0.8)', fontFamily: 'Space Grotesk' }}>
+          <Terminal size={16} /> Configuration reference (.env)
+        </div>
+        OLLAMA_API_KEY=your_key_here
+        <br />
+        OLLAMA_MODEL=deepseek-v4-pro:cloud
+        <br />
+        AGENTHARNESS_MAX_PARALLEL_READERS=2
+      </div>
+    </>
+  )
+}
 
 export default App

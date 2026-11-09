@@ -1,16 +1,119 @@
-import { Activity, Bot, BarChart3, ClipboardList, Clock3, Code2, GitBranch, LayoutDashboard, Play, Settings, ShieldCheck, TerminalSquare } from 'lucide-react'
-export type Page = 'overview'|'run'|'benchmark'|'live'|'history'|'metrics'|'repositories'|'models'|'settings'
-const items:{id:Page;label:string;icon:any;group:string}[] = [
- {id:'overview',label:'Overview',icon:LayoutDashboard,group:'WORKSPACE'},
- {id:'run',label:'Run evaluation',icon:Play,group:'WORKSPACE'},
- {id:'benchmark',label:'Benchmark suite',icon:ClipboardList,group:'WORKSPACE'},
- {id:'live',label:'Live executions',icon:Activity,group:'WORKSPACE'},
- {id:'history',label:'Run history',icon:Clock3,group:'WORKSPACE'},
- {id:'metrics',label:'Metrics & reports',icon:BarChart3,group:'ANALYTICS'},
- {id:'repositories',label:'Repositories',icon:GitBranch,group:'CONFIGURATION'},
- {id:'models',label:'Ollama & model',icon:Bot,group:'CONFIGURATION'},
- {id:'settings',label:'Settings',icon:Settings,group:'CONFIGURATION'},
+import { Activity, Bot, BarChart3, ClipboardList, Clock3, GitBranch, LayoutDashboard, Play, Settings } from 'lucide-react'
+
+export type Page =
+  | 'overview'
+  | 'run'
+  | 'benchmark'
+  | 'live'
+  | 'history'
+  | 'metrics'
+  | 'repositories'
+  | 'models'
+  | 'settings'
+
+export const navItems: { id: Page; label: string; icon: any }[] = [
+  { id: 'overview', label: 'Overview', icon: LayoutDashboard },
+  { id: 'run', label: 'Run evaluation', icon: Play },
+  { id: 'benchmark', label: 'Benchmark suite', icon: ClipboardList },
+  { id: 'live', label: 'Live executions', icon: Activity },
+  { id: 'history', label: 'Run history', icon: Clock3 },
+  { id: 'metrics', label: 'Metrics', icon: BarChart3 },
+  { id: 'repositories', label: 'Repositories', icon: GitBranch },
+  { id: 'models', label: 'Model', icon: Bot },
+  { id: 'settings', label: 'Settings', icon: Settings },
 ]
-export default function Sidebar({page,onNavigate}:{page:Page;onNavigate:(p:Page)=>void}){
- return <aside className="sidebar"><div className="brand"><div className="brand-mark"><Code2 size={20}/></div><div><strong>AgentHarness</strong><span>LAB / LOCAL WORKBENCH</span></div></div><div className="side-nav">{['WORKSPACE','ANALYTICS','CONFIGURATION'].map(group=><div key={group} className="nav-group"><div className="nav-label">{group}</div>{items.filter(i=>i.group===group).map(item=>{const Icon=item.icon;return <button key={item.id} className={`nav-item ${page===item.id?'active':''}`} onClick={()=>onNavigate(item.id)}><Icon size={17}/><span>{item.label}</span>{item.id==='live'&&<i className="nav-pulse"/>}</button>})}</div>)}</div><div className="sidebar-bottom"><div className="online-dot"/> Local execution environment <span className="side-version">v1.0</span></div></aside>
+
+export default function TopNav({
+  page,
+  onNavigate,
+  hasActiveRun,
+}: {
+  page: Page
+  onNavigate: (p: Page) => void
+  hasActiveRun?: boolean
+}) {
+  return (
+    <nav className="tp-nav" aria-label="Main Navigation">
+      {navItems.map((item) => {
+        const Icon = item.icon
+        const isActive = page === item.id
+        return (
+          <button
+            key={item.id}
+            className={`tp-tab ${isActive ? 'active' : ''}`}
+            onClick={() => onNavigate(item.id)}
+          >
+            <Icon size={14} />
+            <span>{item.label}</span>
+            {item.id === 'live' && hasActiveRun && (
+              <span className="online-dot" style={{ width: 6, height: 6 }} />
+            )}
+          </button>
+        )
+      })}
+    </nav>
+  )
+}
+
+const wheelAngles: Record<string, number> = {
+  overview: 90,
+  run: 54,
+  benchmark: 18,
+  live: 0,
+  history: -18,
+  metrics: -54,
+  repositories: -72,
+  models: -80,
+  settings: -90,
+}
+
+const wheelItems: { id: Page; label: string; angle: number }[] = [
+  { id: 'overview', label: 'Overview', angle: -90 },
+  { id: 'run', label: 'Run evaluation', angle: -54 },
+  { id: 'benchmark', label: 'Benchmark suite', angle: -18 },
+  { id: 'history', label: 'Run history', angle: 18 },
+  { id: 'metrics', label: 'Metrics', angle: 54 },
+  { id: 'settings', label: 'Settings', angle: 90 },
+]
+
+export function WheelNav({
+  page,
+  onNavigate,
+}: {
+  page: Page
+  onNavigate: (p: Page) => void
+}) {
+  const currentRotation = wheelAngles[page] ?? 90
+
+  return (
+    <nav className="wh" aria-label="Rotary Navigation">
+      <div className="pt" />
+      <div
+        className="dl"
+        style={{ transform: `rotate(${currentRotation}deg)` }}
+      >
+        <div className="rg" />
+        <div className="tk" />
+        {wheelItems.map((item) => {
+          const isActive = page === item.id
+          return (
+            <div
+              key={item.id}
+              className="it"
+              style={{ transform: `rotate(${item.angle}deg)` }}
+            >
+              <button
+                type="button"
+                className={isActive ? 'active' : ''}
+                onClick={() => onNavigate(item.id)}
+              >
+                {item.label}
+              </button>
+            </div>
+          )
+        })}
+      </div>
+      <div className="hb">TURN THE WHEEL</div>
+    </nav>
+  )
 }
