@@ -1,0 +1,767 @@
+import asyncio
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any
+from .config import Settings
+from .dependencies import is_declared_dependency
+
+ALLOWED_TEST_COMMANDS = {
+    "auto": None,
+    "pytest": ["python", "-m", "pytest", "-q"],
+    "python -m pytest": ["python", "-m", "pytest", "-q"],
+    "pytest -q tests/test_is_even.py": ["python", "-m", "pytest", "-q", "tests/test_is_even.py"],
+    "pytest -q tests/test_normalize_email.py": ["python", "-m", "pytest", "-q", "tests/test_normalize_email.py"],
+    "pytest -q tests/test_safe_divide.py": ["python", "-m", "pytest", "-q", "tests/test_safe_divide.py"],
+    "pytest -q tests/test_unique_preserving_order.py": ["python", "-m", "pytest", "-q", "tests/test_unique_preserving_order.py"],
+    "npm test": ["npm", "test"],
+    "npm run test": ["npm", "run", "test"],
+    "cargo test": ["cargo", "test"],
+    "go test ./...": ["go", "test", "./..."],
+    "mvn test": ["mvn", "-q", "test"],
+    "gradle test": ["gradle", "test"],
+    "ctest": ["ctest", "--output-on-failure"],
+    "make test": ["make", "test"],
+}
+
+SAFE_TEST_BINARY_PREFIXES = {
+    "pytest", "python", "npm", "cargo", "go", "mvn", "gradle", "ctest", "make"
+}
+
+def is_allowed_test_command(command: str) -> bool:
+    if command in ALLOWED_TEST_COMMANDS:
+        return True
+    # Reject shell metacharacters and control characters
+    if any(char in command for char in ";&|`$<>\n\r\x00"):
+        return False
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return False
+    if not tokens:
+        return False
+    
+    first = tokens[0]
+    if first not in SAFE_TEST_BINARY_PREFIXES:
+        return False
+
+    # Check for path traversal anywhere in arguments
+    for token in tokens:
+        if ".." in token:
+            return False
+        if token.startswith("/") and not token.startswith("/"):
+            return False
+
+    # Python/pytest scoped commands
+    if (tokens[:2] == ["pytest", "-q"] or tokens[:2] == ["pytest", "-v"] or tokens[:1] == ["pytest"] or
+        tokens[:4] == ["python", "-m", "pytest", "-q"] or tokens[:4] == ["python", "-m", "pytest", "-v"] or
+        tokens[:3] == ["python", "-m", "pytest"] or tokens[:3] == ["python", "-m", "unittest"]):
+        # Check target path if present
+        for arg in tokens[1:]:
+            if not arg.startswith("-"):
+                path = Path(arg)
+                if path.is_absolute() or ".." in path.parts:
+                    return False
+        return True
+
+    # npm test commands
+    if tokens[:2] == ["npm", "test"] or tokens[:3] == ["npm", "run", "test"]:
+        return True
+
+    # cargo, go, ctest, make test
+    if tokens[:2] == ["cargo", "test"] or tokens[:2] == ["go", "test"] or tokens[:1] == ["ctest"] or tokens[:2] == ["make", "test"]:
+        return True
+
+    return False
+
+
+def resolve_test_command(command: str, workspace: Path) -> list[str] | None:
+    if command in ALLOWED_TEST_COMMANDS:
+        configured = ALLOWED_TEST_COMMANDS[command]
+        if configured is not None:
+            return list(configured)
+        return None
+    if not is_allowed_test_command(command):
+        return None
+    tokens = shlex.split(command)
+    if not tokens:
+        return None
+
+    # For scoped pytest commands specifying a file target (e.g. pytest -q tests/test_foo.py)
+    path_args = [t for t in tokens[1:] if not t.startswith("-") and not t.startswith("@")]
+    if path_args:
+        target = path_args[-1]
+        target_path = (workspace / target).resolve()
+        try:
+            target_path.relative_to(workspace.resolve())
+        except ValueError:
+            return None
+        if not target_path.exists():
+            return None
+
+    if tokens[0] == "pytest":
+        flags = [t for t in tokens[1:] if t.startswith("-")]
+        if "-q" not in flags and "-v" not in flags:
+            flags.insert(0, "-q")
+        args = [t for t in tokens[1:] if not t.startswith("-")]
+        return ["python", "-m", "pytest"] + flags + args
+    if tokens[:3] == ["python", "-m", "pytest"]:
+        flags = [t for t in tokens[3:] if t.startswith("-")]
+        if "-q" not in flags and "-v" not in flags:
+            flags.insert(0, "-q")
+        args = [t for t in tokens[3:] if not t.startswith("-")]
+        return ["python", "-m", "pytest"] + flags + args
+    if tokens[:3] == ["python", "-m", "unittest"]:
+        return ["python", "-m", "unittest"] + tokens[3:]
+
+    return list(tokens)
+
+
+def parse_test_output(
+    command: list[str],
+    exit_code: int | None,
+    stdout: str,
+    stderr: str,
+    timed_out: bool = False,
+    timeout_seconds: int = 180,
+    declared_packages: list[str] | None = None,
+) -> dict[str, Any]:
+    """Parse test execution outputs into explicit verification outcomes and test metrics."""
+    combined = f"{stdout}\n{stderr}".strip()
+    cmd_str = " ".join(command)
+
+    failed_tests = re.findall(r"FAILED\s+([^\s]+)", combined)
+    if not failed_tests:
+        failed_tests = re.findall(r"_{1,}\s*([a-zA-Z0-9_]+)\s*_{1,}", combined)
+    if not failed_tests:
+        failed_tests = re.findall(r"FAIL:\s*([a-zA-Z0-9_]+)", combined)
+    failure_details = sorted(list(set(failed_tests)))
+
+    if timed_out:
+        return {
+            "outcome": "BLOCKED",
+            "passed": False,
+            "error_type": "timeout",
+            "error_message": f"Test execution timed out after {timeout_seconds}s.",
+            "metrics": {"collected": 0, "passed": 0, "failed": 0, "skipped": 0, "errors": 0},
+            "failure_details": failure_details,
+        }
+
+    # Missing tool / runtime
+    if exit_code is None or "Command unavailable" in combined:
+        return {
+            "outcome": "BLOCKED",
+            "passed": False,
+            "error_type": "missing_runtime",
+            "error_message": combined[:400] or "Command runtime unavailable.",
+            "metrics": {"collected": 0, "passed": 0, "failed": 0, "skipped": 0, "errors": 0},
+            "failure_details": failure_details,
+        }
+
+    # Missing dependencies or import failures
+    missing_dep = re.search(r"ModuleNotFoundError:\s*No module named\s*['\"]([^'\"]+)['\"]", combined)
+    if missing_dep and exit_code != 0:
+        dep_name = missing_dep.group(1)
+        if declared_packages is None:
+            outcome = "BLOCKED"
+            err_msg = f"Missing dependency: {dep_name}"
+        else:
+            declared = is_declared_dependency(dep_name, declared_packages)
+            outcome = "BLOCKED" if declared else "MISSING_DEPENDENCY"
+            err_msg = f"Missing dependency: {dep_name}" + ("" if declared else " (undeclared dependency)")
+        return {
+            "outcome": outcome,
+            "passed": False,
+            "error_type": "missing_dependency",
+            "error_message": err_msg,
+            "metrics": {"collected": 0, "passed": 0, "failed": 0, "skipped": 0, "errors": 1},
+            "failure_details": failure_details or [dep_name],
+        }
+
+    import_err = re.search(r"ImportError:\s*(.*)", combined)
+    if import_err and exit_code != 0:
+        outcome = "BLOCKED" if declared_packages is None else "MISSING_DEPENDENCY"
+        return {
+            "outcome": outcome,
+            "passed": False,
+            "error_type": "import_error",
+            "error_message": f"Import error: {import_err.group(1).strip()}",
+            "metrics": {"collected": 0, "passed": 0, "failed": 0, "skipped": 0, "errors": 1},
+            "failure_details": failure_details or [import_err.group(1).strip()[:100]],
+        }
+
+    syntax_err = re.search(r"SyntaxError:\s*(.*)", combined)
+    if syntax_err and exit_code != 0:
+        return {
+            "outcome": "BLOCKED",
+            "passed": False,
+            "error_type": "syntax_error",
+            "error_message": f"Syntax error: {syntax_err.group(1).strip()}",
+            "metrics": {"collected": 0, "passed": 0, "failed": 0, "skipped": 0, "errors": 1},
+            "failure_details": failure_details,
+        }
+
+    # Pytest specific handling
+    if "pytest" in cmd_str:
+        if exit_code == 5 or "no tests ran" in combined.lower():
+            return {
+                "outcome": "NO_TESTS",
+                "passed": False,
+                "error_type": "no_tests_collected",
+                "error_message": "No tests were collected (pytest exit code 5: NO_TESTS_COLLECTED).",
+                "metrics": {"collected": 0, "passed": 0, "failed": 0, "skipped": 0, "errors": 0},
+                "failure_details": [],
+            }
+
+        p_match = re.search(r"(\d+)\s+passed", combined)
+        f_match = re.search(r"(\d+)\s+failed", combined)
+        s_match = re.search(r"(\d+)\s+skipped", combined)
+        e_match = re.search(r"(\d+)\s+error(?:s)?", combined)
+        c_match = re.search(r"collected\s+(\d+)\s+item", combined)
+
+        passed_cnt = int(p_match.group(1)) if p_match else 0
+        failed_cnt = int(f_match.group(1)) if f_match else 0
+        skipped_cnt = int(s_match.group(1)) if s_match else 0
+        errors_cnt = int(e_match.group(1)) if e_match else 0
+        collected_cnt = int(c_match.group(1)) if c_match else (passed_cnt + failed_cnt + skipped_cnt + errors_cnt)
+
+        if collected_cnt == 0 and exit_code != 0:
+            return {
+                "outcome": "NO_TESTS",
+                "passed": False,
+                "error_type": "no_tests_collected",
+                "error_message": "Pytest collected 0 tests.",
+                "metrics": {"collected": 0, "passed": 0, "failed": 0, "skipped": 0, "errors": errors_cnt},
+                "failure_details": failure_details,
+            }
+
+        if exit_code == 0 and passed_cnt > 0 and failed_cnt == 0 and errors_cnt == 0:
+            return {
+                "outcome": "PASS",
+                "passed": True,
+                "error_type": None,
+                "error_message": None,
+                "metrics": {"collected": collected_cnt, "passed": passed_cnt, "failed": failed_cnt, "skipped": skipped_cnt, "errors": errors_cnt},
+                "failure_details": [],
+            }
+
+        if failed_cnt > 0 or errors_cnt > 0 or exit_code != 0:
+            return {
+                "outcome": "FAIL",
+                "passed": False,
+                "error_type": "test_failure",
+                "error_message": f"Pytest failed: {failed_cnt} failed, {errors_cnt} errors out of {collected_cnt} collected.",
+                "metrics": {"collected": collected_cnt, "passed": passed_cnt, "failed": failed_cnt, "skipped": skipped_cnt, "errors": errors_cnt},
+                "failure_details": failure_details,
+            }
+
+    # Python unittest handling
+    if "unittest" in cmd_str:
+        ran_match = re.search(r"Ran\s+(\d+)\s+test", combined)
+        if ran_match:
+            collected_cnt = int(ran_match.group(1))
+            if "OK" in combined and exit_code == 0:
+                return {
+                    "outcome": "PASS",
+                    "passed": True,
+                    "error_type": None,
+                    "error_message": None,
+                    "metrics": {"collected": collected_cnt, "passed": collected_cnt, "failed": 0, "skipped": 0, "errors": 0},
+                    "failure_details": [],
+                }
+            f_u = int(re.search(r"failures=(\d+)", combined).group(1)) if re.search(r"failures=(\d+)", combined) else 0
+            e_u = int(re.search(r"errors=(\d+)", combined).group(1)) if re.search(r"errors=(\d+)", combined) else 0
+            return {
+                "outcome": "FAIL",
+                "passed": False,
+                "error_type": "test_failure",
+                "error_message": f"Unittest failed: {f_u} failures, {e_u} errors out of {collected_cnt} ran.",
+                "metrics": {"collected": collected_cnt, "passed": max(0, collected_cnt - f_u - e_u), "failed": f_u, "skipped": 0, "errors": e_u},
+                "failure_details": failure_details,
+            }
+
+    # Cargo test handling
+    if "cargo" in cmd_str:
+        c_m = re.search(r"test result:\s*([a-zA-Z]+)\.\s*(\d+)\s+passed;\s*(\d+)\s+failed;\s*(\d+)\s+ignored", combined)
+        if c_m:
+            res_word = c_m.group(1).lower()
+            p_c = int(c_m.group(2))
+            f_c = int(c_m.group(3))
+            s_c = int(c_m.group(4))
+            tot = p_c + f_c + s_c
+            is_p = (res_word == "ok" and exit_code == 0 and p_c > 0 and f_c == 0)
+            return {
+                "outcome": "PASS" if is_p else ("NO_TESTS" if tot == 0 else "FAIL"),
+                "passed": is_p,
+                "error_type": None if is_p else ("no_tests_collected" if tot == 0 else "test_failure"),
+                "error_message": None if is_p else ("No cargo tests found." if tot == 0 else f"Cargo test failed: {f_c} failed."),
+                "metrics": {"collected": tot, "passed": p_c, "failed": f_c, "skipped": s_c, "errors": 0},
+                "failure_details": failure_details if not is_p else [],
+            }
+
+    # npm test handling
+    if "npm" in cmd_str:
+        j_pass = re.search(r"Tests:\s*(\d+)\s+passed", combined)
+        j_fail = re.search(r"Tests:\s*(\d+)\s+failed", combined)
+        j_total = re.search(r"Tests:\s*.*?(\d+)\s+total", combined)
+        if j_pass or j_fail or j_total:
+            p_n = int(j_pass.group(1)) if j_pass else 0
+            f_n = int(j_fail.group(1)) if j_fail else 0
+            t_n = int(j_total.group(1)) if j_total else (p_n + f_n)
+            is_p = (exit_code == 0 and p_n > 0 and f_n == 0)
+            return {
+                "outcome": "PASS" if is_p else ("NO_TESTS" if t_n == 0 else "FAIL"),
+                "passed": is_p,
+                "error_type": None if is_p else ("no_tests_collected" if t_n == 0 else "test_failure"),
+                "error_message": None if is_p else (f"npm test failed: {f_n} failed." if f_n > 0 else "No npm tests found."),
+                "metrics": {"collected": t_n, "passed": p_n, "failed": f_n, "skipped": max(0, t_n - p_n - f_n), "errors": 0},
+                "failure_details": failure_details if not is_p else [],
+            }
+
+    # Default fallback
+    if exit_code == 0:
+        return {
+            "outcome": "PASS",
+            "passed": True,
+            "error_type": None,
+            "error_message": None,
+            "metrics": {"collected": 1, "passed": 1, "failed": 0, "skipped": 0, "errors": 0},
+            "failure_details": [],
+        }
+    return {
+        "outcome": "FAIL",
+        "passed": False,
+        "error_type": "command_failed",
+        "error_message": f"Test command exited with code {exit_code}.",
+        "metrics": {"collected": 0, "passed": 0, "failed": 1, "skipped": 0, "errors": 0},
+        "failure_details": failure_details or [f"Exit code {exit_code}"],
+    }
+
+
+class WorkspaceError(RuntimeError): pass
+
+class RepositoryManager:
+    def __init__(self, settings: Settings):
+        self.settings = settings
+        settings.repos_root.mkdir(parents=True, exist_ok=True)
+        settings.runs_root.mkdir(parents=True, exist_ok=True)
+
+    def list_repositories(self) -> list[dict[str, str]]:
+        result = []
+        for path in sorted(self.settings.repos_root.iterdir()):
+            if path.is_dir() and (path / ".git").exists():
+                result.append({"name": path.name, "path": str(path.resolve())})
+        return result
+
+    def register_path(self, raw_path: str) -> dict[str, str]:
+        path = Path(raw_path).expanduser().resolve()
+        root = self.settings.repos_root.resolve()
+        try: path.relative_to(root)
+        except ValueError: raise WorkspaceError(f"Repository must be inside the configured repositories root: {root}")
+        if not path.is_dir() or not (path / ".git").exists():
+            raise WorkspaceError("Path must be an existing Git repository inside the repositories root.")
+        return {"name": path.name, "path": str(path)}
+
+    def resolve_repository(self, name_or_path: str) -> Path:
+        root = self.settings.repos_root.resolve()
+        candidate = Path(name_or_path).expanduser()
+        path = (root / candidate).resolve() if not candidate.is_absolute() else candidate.resolve()
+        try: path.relative_to(root)
+        except ValueError: raise WorkspaceError("Repository path is outside the configured repositories root.")
+        if not path.is_dir() or not (path / ".git").exists():
+            raise WorkspaceError(f"Git repository not found inside {root}: {name_or_path}")
+        return path
+
+    async def create_workspace(self, repo: Path, run_id: str) -> Path:
+        target = self.settings.runs_root / run_id / "repo"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        proc = await asyncio.create_subprocess_exec(
+            "git", "clone", "--local", "--no-hardlinks", "--quiet", str(repo), str(target),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            raise WorkspaceError(f"Could not create isolated repository copy: {stderr.decode(errors='replace')[-2000:]}")
+        return target.resolve()
+
+    async def cleanup_workspace(self, run_id: str):
+        target = self.settings.runs_root / run_id
+        if target.exists():
+            await asyncio.to_thread(shutil.rmtree, target, True)
+
+class ToolRuntime:
+    def __init__(
+        self,
+        workspace: Path,
+        settings: Settings,
+        test_command: str,
+        venv_path: Path | None = None,
+        declared_packages: list[str] | None = None,
+        event_callback=None,
+    ):
+        self.workspace = workspace.resolve()
+        self.settings = settings
+        self.test_command = test_command
+        self.venv_path = venv_path.resolve() if venv_path else None
+        self.declared_packages = declared_packages or []
+        self.event_callback = event_callback
+        self.tool_count = 0
+        self.test_results: list[dict[str, Any]] = []
+
+    def _safe_path(self, raw: str) -> Path:
+        raw = raw or "."
+        path = (self.workspace / raw).resolve()
+        try: path.relative_to(self.workspace)
+        except ValueError: raise WorkspaceError("Path is outside the isolated repository workspace.")
+        return path
+
+    def _clip(self, text: str) -> str:
+        limit = self.settings.agentharness_max_tool_output_chars
+        return text if len(text) <= limit else text[:limit] + f"\n...[truncated at {limit} chars]"
+
+    def tool_definitions(self, allowed: set[str]) -> list[dict[str, Any]]:
+        specs = {
+          "list_files": ("List repository files (ignores .git, node_modules, .venv, and build outputs).", {"path": {"type":"string"}}),
+          "read_file": ("Read a UTF-8 text file in the repository.", {"path": {"type":"string"}}),
+          "search_text": ("Search case-insensitively for text in tracked-like source files.", {"query": {"type":"string"}, "path": {"type":"string"}}),
+          "write_file": ("Create or replace a text file in the isolated repository. Supply the complete intended file content.", {"path": {"type":"string"}, "content": {"type":"string"}}),
+          "run_tests": ("Run the configured, allowlisted test command in the isolated repository.", {"command": {"type":"string"}}),
+          "git_diff": ("Show the current git diff for the isolated repository.", {}),
+          "discover_tests": ("Inspect the repository for test frameworks, test files, and recommended test commands.", {}),
+        }
+        result = []
+        for name in sorted(allowed):
+            desc, props = specs[name]
+            required = list(props.keys())
+            result.append({"type":"function","function":{"name":name,"description":desc,
+              "parameters":{"type":"object","properties":props,"required":required,"additionalProperties":False}}})
+        return result
+
+    def detect_repository_tests(self) -> dict[str, Any]:
+        """Examine repository workspace to discover testing framework, test files, and conventions."""
+        workspace = self.workspace
+        test_files: list[str] = []
+        ignored = {".git", "node_modules", ".venv", "venv", "dist", "build", "__pycache__", ".next"}
+
+        for p in workspace.rglob("*"):
+            if any(part in ignored for part in p.parts):
+                continue
+            if p.is_file():
+                lower = p.name.lower()
+                rel = str(p.relative_to(workspace))
+                is_test = (
+                    lower.startswith("test_")
+                    or lower.endswith("_test.py")
+                    or lower.endswith(".test.js")
+                    or lower.endswith(".test.ts")
+                    or lower.endswith(".spec.js")
+                    or lower.endswith(".spec.ts")
+                    or lower.endswith("_test.go")
+                    or ("tests" in p.parts and p.suffix in {".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".rs", ".java", ".c", ".cpp"})
+                )
+                if is_test:
+                    test_files.append(rel)
+
+        has_python = bool(list(workspace.glob("*.py")) or list(workspace.glob("*/*.py")) or (workspace / "requirements.txt").exists() or (workspace / "pyproject.toml").exists())
+        has_js = (workspace / "package.json").exists()
+        has_rust = (workspace / "Cargo.toml").exists()
+        has_go = (workspace / "go.mod").exists()
+        has_java = (workspace / "pom.xml").exists() or (workspace / "build.gradle").exists() or (workspace / "build.gradle.kts").exists()
+        has_c = (workspace / "CMakeLists.txt").exists() or (workspace / "Makefile").exists()
+
+        if has_python:
+            lang = "python"
+            framework = "pytest"
+            rec_cmd = f"pytest -q {test_files[0]}" if test_files else "python -m pytest -q"
+        elif has_js:
+            lang = "javascript/typescript"
+            framework = "npm test"
+            rec_cmd = "npm test"
+        elif has_rust:
+            lang = "rust"
+            framework = "cargo test"
+            rec_cmd = "cargo test"
+        elif has_go:
+            lang = "go"
+            framework = "go test"
+            rec_cmd = "go test ./..."
+        elif has_java:
+            lang = "java"
+            framework = "maven" if (workspace / "pom.xml").exists() else "gradle"
+            rec_cmd = "mvn test" if (workspace / "pom.xml").exists() else "gradle test"
+        elif has_c:
+            lang = "c/cpp"
+            framework = "ctest" if (workspace / "CMakeLists.txt").exists() else "make test"
+            rec_cmd = "ctest" if (workspace / "CMakeLists.txt").exists() else "make test"
+        else:
+            lang = "unknown"
+            framework = "unknown"
+            rec_cmd = "auto"
+
+        has_tests = len(test_files) > 0
+        missing_notes = None
+        if not has_tests:
+            if lang == "python":
+                missing_notes = "No test files were found. Coding Agent must create tests/test_<feature>.py with reproducible test assertions."
+            elif lang == "javascript/typescript":
+                missing_notes = "No test files were found. Coding Agent should create a meaningful test file."
+            else:
+                missing_notes = f"No test files found for {lang} repository."
+
+        return {
+            "detected_language": lang,
+            "detected_framework": framework,
+            "has_existing_tests": has_tests,
+            "existing_test_files": sorted(test_files[:50]),
+            "recommended_command": rec_cmd,
+            "missing_coverage_notes": missing_notes,
+        }
+
+    async def execute(self, name: str, args: dict[str, Any]) -> str:
+        self.tool_count += 1
+        if name == "discover_tests":
+            info = self.detect_repository_tests()
+            return json.dumps(info, indent=2)
+        if name == "list_files":
+            base = self._safe_path(args.get("path", "."))
+            if not base.exists() or not base.is_dir(): return "Directory not found."
+            ignored = {".git", "node_modules", ".venv", "venv", "dist", "build", "__pycache__", ".next"}
+            files = []
+            for p in base.rglob("*"):
+                if any(part in ignored for part in p.parts): continue
+                if p.is_file(): files.append(str(p.relative_to(self.workspace)))
+                if len(files) >= 300: break
+            return self._clip("\n".join(files) or "No files found.")
+        if name == "read_file":
+            path = self._safe_path(args["path"])
+            if not path.is_file(): return "File not found."
+            if path.stat().st_size > 500_000: return "File exceeds 500 KB; inspect a smaller file."
+            try: return self._clip(path.read_text(encoding="utf-8"))
+            except UnicodeDecodeError: return "File is not UTF-8 text."
+        if name == "search_text":
+            query = str(args.get("query", ""))[:300].lower()
+            base = self._safe_path(args.get("path", "."))
+            ignored = {".git", "node_modules", ".venv", "venv", "dist", "build", "__pycache__", ".next"}
+            hits = []
+            if not query: return "Search query is empty."
+            for p in base.rglob("*") if base.is_dir() else [base]:
+                if not p.is_file() or any(part in ignored for part in p.parts): continue
+                try:
+                    if p.stat().st_size > 250_000: continue
+                    for i, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1):
+                        if query in line.lower(): hits.append(f"{p.relative_to(self.workspace)}:{i}: {line[:300]}")
+                        if len(hits) >= 100: break
+                except (UnicodeDecodeError, OSError): continue
+                if len(hits) >= 100: break
+            return self._clip("\n".join(hits) or "No matches found.")
+        if name == "write_file":
+            path = self._safe_path(args["path"])
+            if path.name in {".env", ".gitconfig"} or ".git" in path.parts:
+                return "Refused to write a protected path."
+            content = str(args.get("content", ""))
+            if len(content) > 250_000: return "Refused: file content exceeds 250 KB."
+            path.parent.mkdir(parents=True, exist_ok=True)
+            await asyncio.to_thread(path.write_text, content, encoding="utf-8")
+            return f"Wrote {path.relative_to(self.workspace)} ({len(content)} characters)."
+        if name == "git_diff":
+            # Include untracked files in the diff without staging their content. This workspace is disposable.
+            await self._run_command(["git", "add", "-N", "--", "."], timeout=20)
+            return await self._run_command(["git", "diff", "--no-ext-diff", "--", "."], timeout=20)
+        if name == "run_tests":
+            requested = str(args.get("command", "auto"))
+            if not is_allowed_test_command(requested):
+                return f"Refused. Allowed test commands: {', '.join(ALLOWED_TEST_COMMANDS)} or a scoped test command like 'pytest -q tests/test_example.py'."
+            if self.test_command != "auto" and requested not in {"auto", self.test_command}:
+                return f"Refused: the user selected '{self.test_command}'. Run that configured command instead."
+            if requested == "auto" and self.test_command != "auto":
+                requested = self.test_command
+            command = self._detect_test_command() if requested == "auto" else resolve_test_command(requested, self.workspace)
+            if not command:
+                test_info = self.detect_repository_tests()
+                lang = test_info.get("detected_language", "unknown")
+                return f"No recognized test runner found for {lang} repository. If you added a test file, ensure it is in tests/ (e.g., tests/test_*.py) or choose an allowlisted test command."
+            record = await self.run_test_command(command, timeout=self.settings.agentharness_test_timeout_seconds)
+            return record["output"]
+        return f"Unknown tool: {name}"
+
+    def _detect_test_command(self) -> list[str] | None:
+        has_py_test = (
+            (self.workspace / "pytest.ini").exists()
+            or (self.workspace / "pyproject.toml").exists()
+            or list(self.workspace.glob("test_*.py"))
+            or list(self.workspace.glob("*_test.py"))
+            or (self.workspace / "tests").exists()
+        )
+        if has_py_test:
+            return ["python", "-m", "pytest", "-q"]
+
+        pkg = self.workspace / "package.json"
+        if pkg.exists():
+            try:
+                data = json.loads(pkg.read_text())
+                if "test" in data.get("scripts", {}): return ["npm", "test", "--", "--runInBand"]
+            except Exception: pass
+        if (self.workspace / "Cargo.toml").exists(): return ["cargo", "test"]
+        if (self.workspace / "go.mod").exists(): return ["go", "test", "./..."]
+        if (self.workspace / "pom.xml").exists(): return ["mvn", "-q", "test"]
+        if (self.workspace / "build.gradle").exists() or (self.workspace / "build.gradle.kts").exists(): return ["gradle", "test"]
+        if (self.workspace / "CMakeLists.txt").exists(): return ["ctest", "--output-on-failure"]
+        if (self.workspace / "Makefile").exists(): return ["make", "test"]
+
+        # If python repository without tests, use python -m pytest -q so newly added tests or exit code 5 are executed
+        if list(self.workspace.glob("*.py")) or list(self.workspace.glob("*/*.py")) or (self.workspace / "requirements.txt").exists():
+            return ["python", "-m", "pytest", "-q"]
+
+        return None
+
+    def _build_env(self) -> dict[str, str]:
+        safe_env = {key: os.environ[key] for key in ("PATH", "HOME", "TMPDIR", "TEMP", "TMP", "SYSTEMROOT", "WINDIR", "LANG", "LC_ALL") if key in os.environ}
+        safe_env.update({"CI": "1", "NO_COLOR": "1"})
+        cur_pythonpath = os.environ.get("PYTHONPATH", "")
+        safe_env["PYTHONPATH"] = f"{self.workspace}:{cur_pythonpath}".rstrip(":")
+        if self.venv_path and self.venv_path.is_dir():
+            safe_env["VIRTUAL_ENV"] = str(self.venv_path)
+            safe_env["PATH"] = f"{self.venv_path / 'bin'}:{safe_env.get('PATH', '')}"
+        elif "VIRTUAL_ENV" in os.environ:
+            safe_env["VIRTUAL_ENV"] = os.environ["VIRTUAL_ENV"]
+        return safe_env
+
+    def _resolve_executable(self, command: list[str]) -> list[str]:
+        exec_cmd = list(command)
+        if not exec_cmd:
+            return exec_cmd
+        if self.venv_path and self.venv_path.is_dir():
+            py_in_venv = self.venv_path / "bin" / "python"
+            pytest_in_venv = self.venv_path / "bin" / "pytest"
+            if exec_cmd[0] in {"python", "python3"} and py_in_venv.is_file():
+                exec_cmd[0] = str(py_in_venv)
+            elif exec_cmd[0] == "pytest" and pytest_in_venv.is_file():
+                exec_cmd[0] = str(pytest_in_venv)
+        elif exec_cmd[0] == "python" and not shutil.which("python"):
+            exec_cmd[0] = sys.executable or shutil.which("python3") or "python3"
+        return exec_cmd
+
+    async def run_test_command(self, command: list[str], timeout: int) -> dict[str, Any]:
+        """Execute test command, capturing stdout/stderr separately with metrics and outcome analysis."""
+        self._emit("tool_started", "Running command: " + " ".join(command), {"command": command})
+        started = time.perf_counter()
+        try:
+            safe_env = self._build_env()
+            exec_cmd = self._resolve_executable(command)
+
+            proc = await asyncio.create_subprocess_exec(
+                *exec_cmd, cwd=self.workspace,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=safe_env
+            )
+            timed_out = False
+            try:
+                stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+                stdout = stdout_b.decode(errors="replace")
+                stderr = stderr_b.decode(errors="replace")
+                exit_code = proc.returncode
+            except asyncio.TimeoutError:
+                proc.kill()
+                stdout_b, stderr_b = await proc.communicate()
+                stdout = stdout_b.decode(errors="replace")
+                stderr = stderr_b.decode(errors="replace")
+                exit_code = None
+                timed_out = True
+            except asyncio.CancelledError:
+                proc.kill()
+                await proc.communicate()
+                raise
+
+            duration_ms = round((time.perf_counter() - started) * 1000)
+            analysis = parse_test_output(
+                command, exit_code, stdout, stderr,
+                timed_out=timed_out, timeout_seconds=timeout,
+                declared_packages=self.declared_packages
+            )
+
+            # Combined formatted view for tool returns
+            m = analysis["metrics"]
+            out_lines = [
+                f"exit code: {exit_code if exit_code is not None else 'TIMED_OUT'} ({analysis['outcome']})",
+                f"metrics: {m['collected']} collected, {m['passed']} passed, {m['failed']} failed, {m['skipped']} skipped [{duration_ms} ms]",
+            ]
+            if stdout.strip():
+                out_lines.append(f"--- stdout ---\n{stdout.strip()}")
+            if stderr.strip():
+                out_lines.append(f"--- stderr ---\n{stderr.strip()}")
+            if analysis.get("error_message"):
+                out_lines.append(f"--- outcome ---\n{analysis['error_message']}")
+
+            formatted_output = self._clip("\n\n".join(out_lines))
+
+            record = {
+                "command": command,
+                "exit_code": exit_code,
+                "duration_ms": duration_ms,
+                "stdout": stdout,
+                "stderr": stderr,
+                "output": formatted_output,
+                "passed": analysis["passed"],
+                "outcome": analysis["outcome"],
+                "metrics": analysis["metrics"],
+                "error_type": analysis.get("error_type"),
+                "error_message": analysis.get("error_message"),
+                "timed_out": timed_out,
+            }
+            self.test_results.append(record)
+
+            # Preserve test artifact inside the run repo
+            try:
+                (self.workspace / ".test_last_result.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
+            except Exception:
+                pass
+
+            return record
+        except FileNotFoundError as exc:
+            duration_ms = round((time.perf_counter() - started) * 1000)
+            err_msg = f"Command unavailable ({exc.filename}). Install the repository's test runtime."
+            record = {
+                "command": command,
+                "exit_code": None,
+                "duration_ms": duration_ms,
+                "stdout": "",
+                "stderr": err_msg,
+                "output": err_msg,
+                "passed": False,
+                "outcome": "BLOCKED",
+                "metrics": {"collected": 0, "passed": 0, "failed": 0, "skipped": 0, "errors": 1},
+                "error_type": "missing_runtime",
+                "error_message": err_msg,
+                "timed_out": False,
+            }
+            self.test_results.append(record)
+            return record
+
+    async def _run_command(self, command: list[str], timeout: int) -> str:
+        self._emit("tool_started", "Running command: " + " ".join(command), {"command": command})
+        try:
+            safe_env = self._build_env()
+            exec_cmd = self._resolve_executable(command)
+            proc = await asyncio.create_subprocess_exec(*exec_cmd, cwd=self.workspace,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, env=safe_env)
+            try: stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            except asyncio.TimeoutError:
+                proc.kill(); stdout, _ = await proc.communicate()
+                output = stdout.decode(errors="replace") + f"\nCommand timed out after {timeout}s."
+                return self._clip(output)
+            except asyncio.CancelledError:
+                proc.kill()
+                await proc.communicate()
+                raise
+            output = stdout.decode(errors="replace")
+            return self._clip(f"exit code: {proc.returncode}\n{output}")
+        except FileNotFoundError as exc:
+            return f"Command unavailable ({exc.filename}). Install the repository's test runtime."
+
+    def _emit(self, event_type, message, data):
+        if self.event_callback: self.event_callback(event_type, message, data)

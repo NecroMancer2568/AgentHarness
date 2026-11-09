@@ -1,0 +1,9 @@
+{
+  "compilerOptions": {
+    "target":"ES2022", "useDefineForClassFields":true, "lib":["ES2022","DOM","DOM.Iterable"],
+    "module":"ESNext", "skipLibCheck":true, "moduleResolution":"Bundler", "allowImportingTsExtensions":true, "types":["vite/client"],
+    "resolveJsonModule":true, "isolatedModules":true, "noEmit":true, "jsx":"react-jsx", "strict":true, "esModuleInterop":true, "allowSyntheticDefaultImports":true,
+    "noUnusedLocals":false, "noUnusedParameters":false
+  },
+  "include":["src"]
+}
