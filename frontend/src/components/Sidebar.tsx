@@ -1,4 +1,4 @@
-import { Activity, Bot, BarChart3, ClipboardList, Clock3, GitBranch, LayoutDashboard, Play, Settings } from 'lucide-react'
+import { Activity, BarChart3, ClipboardList, Clock3, GitBranch, LayoutDashboard, Play } from 'lucide-react'
 
 export type Page =
   | 'overview'
@@ -8,8 +8,6 @@ export type Page =
   | 'history'
   | 'metrics'
   | 'repositories'
-  | 'models'
-  | 'settings'
 
 export const navItems: { id: Page; label: string; icon: any }[] = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
@@ -19,8 +17,6 @@ export const navItems: { id: Page; label: string; icon: any }[] = [
   { id: 'history', label: 'Run history', icon: Clock3 },
   { id: 'metrics', label: 'Metrics', icon: BarChart3 },
   { id: 'repositories', label: 'Repositories', icon: GitBranch },
-  { id: 'models', label: 'Model', icon: Bot },
-  { id: 'settings', label: 'Settings', icon: Settings },
 ]
 
 export default function TopNav({
@@ -57,23 +53,22 @@ export default function TopNav({
 
 const wheelAngles: Record<string, number> = {
   overview: 90,
-  run: 54,
-  benchmark: 18,
+  run: 60,
+  benchmark: 30,
   live: 0,
-  history: -18,
-  metrics: -54,
-  repositories: -72,
-  models: -80,
-  settings: -90,
+  history: -30,
+  metrics: -60,
+  repositories: -90,
 }
 
 const wheelItems: { id: Page; label: string; angle: number }[] = [
   { id: 'overview', label: 'Overview', angle: -90 },
-  { id: 'run', label: 'Run evaluation', angle: -54 },
-  { id: 'benchmark', label: 'Benchmark suite', angle: -18 },
-  { id: 'history', label: 'Run history', angle: 18 },
-  { id: 'metrics', label: 'Metrics', angle: 54 },
-  { id: 'settings', label: 'Settings', angle: 90 },
+  { id: 'run', label: 'Run evaluation', angle: -60 },
+  { id: 'benchmark', label: 'Benchmark suite', angle: -30 },
+  { id: 'live', label: 'Live executions', angle: 0 },
+  { id: 'history', label: 'Run history', angle: 30 },
+  { id: 'metrics', label: 'Metrics', angle: 60 },
+  { id: 'repositories', label: 'Repositories', angle: 90 },
 ]
 
 export function WheelNav({

@@ -6,8 +6,6 @@ import {
   CheckCircle2,
   CircleDot,
   Clock3,
-  Code2,
-  Cpu,
   FileArchive,
   FileCode2,
   FolderPlus,
@@ -18,7 +16,6 @@ import {
   Plus,
   RefreshCw,
   ShieldCheck,
-  Terminal,
   Timer,
   Trash2,
   UploadCloud,
@@ -275,15 +272,9 @@ function App() {
             onSelectRepoForRun={(r) => setSelectedRepoForRun(r)}
           />
         )}
-
-        {page === 'models' && <ModelsPage settings={settings} />}
-
-        {page === 'settings' && (
-          <SettingsPage settings={settings} onRefresh={refresh} />
-        )}
       </main>
 
-      {/* Rotary Wheel Navigation at the bottom */}
+      {/* Rotary Wheel Navigation docked at the bottom */}
       <WheelNav page={page} onNavigate={navigate} />
     </div>
   )
@@ -292,7 +283,7 @@ function App() {
 function Overview({
   runs,
   metrics,
-  repos,
+  repos: _repos,
   loading: _loading,
   onNavigate,
   onOpenRun,
@@ -427,32 +418,6 @@ function Overview({
               action={<Button onClick={() => onNavigate('run')}>Start an evaluation</Button>}
             />
           )}
-        </div>
-      </div>
-
-      <div className="gr c3" style={{ marginTop: 24 }}>
-        <div className="c clickable-row" onClick={() => onNavigate('repositories')}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 }}>
-            <GitBranch size={20} />
-            <h2>{repos.length} Repositories</h2>
-          </div>
-          <div className="sb">Git repositories available to the harness</div>
-        </div>
-
-        <div className="c clickable-row" onClick={() => onNavigate('models')}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 }}>
-            <Bot size={20} />
-            <h2>Inference Model</h2>
-          </div>
-          <div className="sb">Ollama inference endpoint &amp; configuration</div>
-        </div>
-
-        <div className="c clickable-row" onClick={() => onNavigate('settings')}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 }}>
-            <HardDrive size={20} />
-            <h2>Local Workspace</h2>
-          </div>
-          <div className="sb">Isolated Git clones for safe evaluation</div>
         </div>
       </div>
     </>
@@ -1739,146 +1704,6 @@ function RepositoriesPage({
         <span className="mono" style={{ fontSize: 13, color: 'rgba(255,255,255,0.7)' }}>
           {root || 'Loading…'}
         </span>
-      </div>
-    </>
-  )
-}
-
-function ModelsPage({ settings }: { settings: any }) {
-  return (
-    <>
-      <PageHeader
-        eyebrow="Inference configuration"
-        title="Ollama & model"
-        description="The project uses one fixed model so performance metrics reflect harness behavior, not model comparisons."
-      />
-
-      <div className="c" style={{ marginBottom: 24 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
-          <div className="lg" style={{ width: 44, height: 44 }} />
-          <div>
-            <div style={{ display: 'flex', gap: 10, marginBottom: 6 }}>
-              <span className="pl succeeded">Configured model</span>
-              <span className="pl">Cloud inference</span>
-            </div>
-            <h2>{settings.model || 'DeepSeek V4 Pro'}</h2>
-            <div className="sb" style={{ marginTop: 4 }}>
-              <span className="online-dot" style={{ marginRight: 6 }} />
-              {settings.api_key_configured ? 'API key configured' : 'API key missing'} · Ollama OpenAI-compatible endpoint
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div className="gr e2">
-        <div className="c">
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
-            <Cpu size={18} />
-            <h2>Provider details</h2>
-          </div>
-          <div className="rw">
-            <span className="lb">Base URL</span>
-            <span className="mono" style={{ fontSize: 13 }}>{settings.base_url || 'https://ollama.com/v1'}</span>
-          </div>
-          <div className="rw">
-            <span className="lb">Model identifier</span>
-            <span className="mono" style={{ fontSize: 13 }}>{settings.model || 'deepseek-v4-pro:cloud'}</span>
-          </div>
-          <div className="rw">
-            <span className="lb">API key</span>
-            <span className="mono" style={{ fontSize: 13 }}>{settings.api_key_configured ? 'Configured in backend/.env' : 'Not configured'}</span>
-          </div>
-        </div>
-
-        <div className="c">
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
-            <Zap size={18} />
-            <h2>Execution limits</h2>
-          </div>
-          <div className="rw">
-            <span className="lb">Max agent tool steps</span>
-            <span className="mono" style={{ fontSize: 13 }}>{settings.max_agent_steps ?? '—'}</span>
-          </div>
-          <div className="rw">
-            <span className="lb">Concurrent read agents</span>
-            <span className="mono" style={{ fontSize: 13 }}>{settings.max_parallel_readers ?? '—'}</span>
-          </div>
-          <div className="rw">
-            <span className="lb">Test timeout</span>
-            <span className="mono" style={{ fontSize: 13 }}>{settings.test_timeout_seconds ?? '—'} s</span>
-          </div>
-        </div>
-      </div>
-    </>
-  )
-}
-
-function SettingsPage({ settings, onRefresh }: { settings: any; onRefresh: () => void }) {
-  return (
-    <>
-      <PageHeader
-        eyebrow="Application configuration"
-        title="Settings"
-        description="Runtime configuration is read from backend/.env. Restart the API to apply changes."
-        action={
-          <Button kind="secondary" onClick={onRefresh}>
-            <RefreshCw size={14} /> Refresh config
-          </Button>
-        }
-      />
-
-      <div className="gr e2">
-        <div className="c">
-          <h2>Local paths</h2>
-          <div className="rw">
-            <span className="lb">Repository root</span>
-            <span className="mono" style={{ fontSize: 13 }}>{settings.repos_root || '…/workspace/repositories'}</span>
-          </div>
-          <div className="rw">
-            <span className="lb">Run workspaces</span>
-            <span className="mono" style={{ fontSize: 13 }}>{settings.runs_root || '…/workspace/runs'}</span>
-          </div>
-        </div>
-
-        <div className="c">
-          <h2>Safety defaults</h2>
-          <div className="rw">
-            <span className="lb">Repository boundary</span>
-            <span className="mono" style={{ fontSize: 13 }}>Enforced</span>
-          </div>
-          <div className="rw">
-            <span className="lb">Allowed test commands</span>
-            <span className="mono" style={{ fontSize: 13 }}>Allowlist only</span>
-          </div>
-          <div className="rw">
-            <span className="lb">Disposable clone</span>
-            <span className="mono" style={{ fontSize: 13 }}>Enabled</span>
-          </div>
-          <div className="rw">
-            <span className="lb">Command timeout</span>
-            <span className="mono" style={{ fontSize: 13 }}>{settings.test_timeout_seconds || 180}s</span>
-          </div>
-        </div>
-      </div>
-
-      <div
-        className="c mono"
-        style={{
-          marginTop: 20,
-          fontSize: 13,
-          lineHeight: 1.8,
-          padding: '20px 26px',
-          background: 'rgba(0,0,0,0.5)',
-        }}
-      >
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10, color: 'rgba(255,255,255,0.8)', fontFamily: 'Space Grotesk' }}>
-          <Terminal size={16} /> Configuration reference (.env)
-        </div>
-        OLLAMA_API_KEY=your_key_here
-        <br />
-        OLLAMA_MODEL=deepseek-v4-pro:cloud
-        <br />
-        AGENTHARNESS_MAX_PARALLEL_READERS=2
       </div>
     </>
   )

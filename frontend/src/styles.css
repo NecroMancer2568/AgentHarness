@@ -57,9 +57,9 @@ button:disabled {
               radial-gradient(800px 520px at 95% 35%, #1d1d1d, transparent),
               #050505;
   color: #f5f5f5;
-  padding: 24px 36px 40px;
+  padding: 24px 36px 0;
   box-sizing: border-box;
-  overflow-x: hidden;
+  overflow-x: clip;
 }
 
 .b {
@@ -219,7 +219,7 @@ button:disabled {
   max-width: 1400px;
   width: 100%;
   margin: 0 auto;
-  padding-bottom: 60px;
+  padding-bottom: 40px;
 }
 
 /* Typography */
@@ -747,18 +747,22 @@ label.fl {
   box-shadow: 0 0 10px #f87171;
 }
 
-/* Wheel Navigation at bottom */
+/* Wheel Navigation docked at bottom */
 .wh {
-  position: relative;
+  position: sticky;
+  bottom: 0;
+  left: 0;
+  right: 0;
   width: 100%;
-  height: 280px;
+  height: 220px;
   overflow: hidden;
-  margin-top: 40px;
+  margin: 0 auto;
   display: flex;
   justify-content: center;
   mask-image: linear-gradient(transparent, #000 24%);
   -webkit-mask-image: linear-gradient(transparent, #000 24%);
-  pointer-events: auto;
+  pointer-events: none;
+  z-index: 50;
 }
 
 .dl {
@@ -767,6 +771,7 @@ label.fl {
   width: 660px;
   height: 660px;
   transition: transform 0.8s cubic-bezier(0.2, 0.8, 0.2, 1);
+  pointer-events: auto;
 }
 
 .rg {
@@ -775,7 +780,7 @@ label.fl {
   border-radius: 50%;
   border: 1px solid rgba(255, 255, 255, 0.25);
   background: radial-gradient(circle, #050505 0, #0c0c0c 60%, rgba(255, 255, 255, 0.1) 100%);
-  box-shadow: 0 -20px 80px rgba(255, 255, 255, 0.08),
+  box-shadow: 0 -20px 80px rgba(0, 0, 0, 0.95),
               inset 0 1px 0 rgba(255, 255, 255, 0.4);
 }
 
@@ -806,13 +811,14 @@ label.fl {
   text-align: center;
   font-size: 14px;
   font-weight: 500;
-  color: rgba(255, 255, 255, 0.6);
+  color: rgba(255, 255, 255, 0.65);
   cursor: pointer;
   border-radius: 20px;
   border: 0;
   background: transparent;
   transition: 0.35s;
   white-space: nowrap;
+  pointer-events: auto;
 }
 
 .it button:hover {
@@ -835,6 +841,7 @@ label.fl {
   border: 7px solid transparent;
   border-top: 10px solid #fff;
   z-index: 2;
+  pointer-events: none;
 }
 
 .hb {
@@ -846,6 +853,7 @@ label.fl {
   letter-spacing: 0.24em;
   color: rgba(255, 255, 255, 0.45);
   text-transform: uppercase;
+  pointer-events: none;
 }
 
 /* 3D Intro Animation */
@@ -993,7 +1001,7 @@ tr:hover td {
 }
 
 @media (max-width: 768px) {
-  .rt { padding: 16px 18px; }
+  .rt { padding: 16px 18px 0; }
   .c4, .c3 { grid-template-columns: 1fr; }
   .tp { flex-direction: column; align-items: stretch; }
   .tp-nav { max-width: 100%; overflow-x: auto; }
