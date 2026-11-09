@@ -11,3 +11,27 @@
 .benchmark-controls>div{flex:1;min-width:0}.benchmark-controls strong{font-size:12px}.benchmark-controls p{margin:6px 0 0;color:var(--muted);font-size:10.5px;line-height:1.6}.benchmark-repetitions{display:flex;align-items:center;gap:8px;color:var(--soft);font-size:10px;white-space:nowrap}.benchmark-repetitions .field-control{width:86px}.benchmark-task-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-bottom:24px}.benchmark-task{padding:16px;min-width:0}.benchmark-task-top{display:flex;align-items:center;justify-content:space-between;gap:8px}.benchmark-task-top code{font:8px 'DM Mono',monospace;color:#8190a7;overflow-wrap:anywhere;text-align:right}.benchmark-task h3{font-size:11.5px;line-height:1.65;margin:13px 0 8px;color:#d8e0ee}.benchmark-task p{font-size:9.5px;color:var(--muted);margin:0 0 10px}.benchmark-command{display:block;font:9px 'DM Mono',monospace;color:#a9bbd8;background:#0b0f15;border:1px solid #252c39;padding:8px;border-radius:6px;overflow-wrap:anywhere}.benchmark-run-header{padding:17px 20px;display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:14px}.benchmark-run-title{display:flex;align-items:center;gap:10px}.benchmark-run-title strong{font-size:12px}.benchmark-run-header p{font-size:10px;color:var(--muted);margin:7px 0 0}.benchmark-actions{display:flex;gap:8px}.benchmark-stats{margin-bottom:14px}.benchmark-controls .button{white-space:nowrap}@media(max-width:850px){.benchmark-controls{align-items:flex-start;flex-wrap:wrap}.benchmark-controls>div{flex-basis:100%}.benchmark-task-grid{grid-template-columns:1fr}.benchmark-run-header{align-items:flex-start;flex-direction:column}}
 
 .boot-screen{min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:28px;background:#0b0d12;color:#e8ecf5;text-align:center;font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}.boot-mark{width:48px;height:48px;display:grid;place-items:center;border-radius:14px;background:linear-gradient(135deg,#5b8bff,#8e79f9);color:white;font-weight:800;letter-spacing:-.5px;margin-bottom:18px}.boot-screen h1{font-size:24px;margin:0 0 8px}.boot-screen p{font-size:14px;color:#aab4c5;margin:0 0 14px}.boot-screen small{max-width:560px;font-size:12px;line-height:1.7;color:#8792a5}.boot-error pre{max-width:min(720px,100%);max-height:240px;overflow:auto;white-space:pre-wrap;text-align:left;background:#141923;border:1px solid #ff7c8b55;border-radius:8px;padding:14px;color:#ffb7bf}
+
+/* Repository source tabs and file import */
+.repo-tabs{display:flex;gap:6px;margin:14px 0 18px;border-bottom:1px solid #252c39;padding-bottom:10px}
+.repo-tab{display:inline-flex;align-items:center;gap:7px;border:1px solid #2b3548;background:#141a24;color:#919fb5;padding:7px 12px;border-radius:7px;font-size:10.5px;font-weight:500;transition:.15s}
+.repo-tab:hover{background:#1c2535;color:#d5dfef}
+.repo-tab.active{background:#20345b;border-color:#4a6cb5;color:#adc6ff}
+.repo-tab svg{color:#83a5ff}
+
+.file-dropzone{border:1px dashed #344057;border-radius:9px;padding:22px 14px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;background:#0d1118;cursor:pointer;transition:.15s;margin:12px 0}
+.file-dropzone:hover,.file-dropzone.drag-active{border-color:#6c96ff;background:#141c2b}
+.file-dropzone-icon{width:36px;height:36px;border-radius:10px;background:#192338;color:#85a7ff;display:grid;place-items:center;margin-bottom:9px}
+.file-dropzone strong{font-size:11px;color:#d4deee;display:block}
+.file-dropzone span{font-size:9.5px;color:#7a879e;margin-top:4px;display:block}
+.file-selected{display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid #2b384f;border-radius:8px;background:#141b26;margin:10px 0;font-size:10.5px}
+.file-selected svg{color:#6dd6a8;flex-shrink:0}
+.file-selected strong{color:#e0e8f5;word-break:break-all}
+.file-selected small{color:#76849a;margin-left:auto;white-space:nowrap}
+
+.repo-actions{display:flex;align-items:center;gap:8px;margin-left:auto}
+.repo-btn{display:inline-flex;align-items:center;gap:5px;border:1px solid #273142;background:#141a24;color:#9eb0ca;border-radius:6px;padding:5px 9px;font-size:9.5px;transition:.15s}
+.repo-btn:hover{background:#1d2738;color:#ffffff;border-color:#3d4e6b}
+.repo-btn.danger{background:#2b181f;border-color:#4a232e;color:#ff9fa9}
+.repo-btn.danger:hover{background:#3d1e28;color:#ffc1c8;border-color:#6e2e3d}
+.success-banner{padding:10px 12px;border:1px solid #275945;background:#143428;color:#7bf2be;border-radius:8px;font-size:10.5px;margin-top:12px;display:flex;align-items:center;gap:8px}

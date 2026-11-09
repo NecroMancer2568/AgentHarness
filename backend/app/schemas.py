@@ -13,6 +13,15 @@ class RunCreate(BaseModel):
 class RepositoryRegister(BaseModel):
     path: str = Field(min_length=1, max_length=1000)
 
+class RepositoryClone(BaseModel):
+    url: str = Field(min_length=3, max_length=1000)
+    name: str | None = Field(default=None, max_length=200)
+    branch: str | None = Field(default=None, max_length=200)
+
+class RepositoryImportFolder(BaseModel):
+    path: str = Field(min_length=1, max_length=1000)
+    name: str | None = Field(default=None, max_length=200)
+
 class RunSummary(BaseModel):
     id: str
     repository: str

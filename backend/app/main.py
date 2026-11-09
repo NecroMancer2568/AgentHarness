@@ -3,7 +3,7 @@ import json
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from .config import get_settings
@@ -12,7 +12,7 @@ from .llm import LLMClient
 from .repository import RepositoryManager, WorkspaceError
 from .runner import RunManager
 from .benchmarks import BenchmarkManager
-from .schemas import BenchmarkStart, HealthOut, RepositoryRegister, RunCreate
+from .schemas import BenchmarkStart, HealthOut, RepositoryClone, RepositoryImportFolder, RepositoryRegister, RunCreate
 
 settings = get_settings()
 db = Database(settings.database_path)
@@ -51,6 +51,43 @@ async def register_repository(body: RepositoryRegister):
     try: item = repos.register_path(body.path)
     except WorkspaceError as exc: raise HTTPException(400, str(exc))
     return {"repository":item}
+
+@app.post("/api/repositories/clone")
+async def clone_repository(body: RepositoryClone):
+    try:
+        item = await repos.clone_repository(body.url, custom_name=body.name, branch=body.branch)
+        return {"repository": item}
+    except WorkspaceError as exc:
+        raise HTTPException(400, str(exc))
+
+@app.post("/api/repositories/upload-zip")
+async def upload_zip_repository(file: UploadFile = File(...), name: str | None = Form(default=None)):
+    if not file.filename or not file.filename.lower().endswith(".zip"):
+        raise HTTPException(400, "Only .zip archive files are supported.")
+    try:
+        contents = await file.read()
+        if len(contents) > 250 * 1024 * 1024:
+            raise HTTPException(400, "Zip file exceeds maximum upload size of 250 MB.")
+        item = await repos.import_zip(contents, file.filename, custom_name=name)
+        return {"repository": item}
+    except WorkspaceError as exc:
+        raise HTTPException(400, str(exc))
+
+@app.post("/api/repositories/import-folder")
+async def import_folder_repository(body: RepositoryImportFolder):
+    try:
+        item = await repos.import_local_folder(body.path, custom_name=body.name)
+        return {"repository": item}
+    except WorkspaceError as exc:
+        raise HTTPException(400, str(exc))
+
+@app.delete("/api/repositories/{name}")
+async def delete_repository(name: str):
+    try:
+        repos.delete_repository(name)
+        return {"status": "deleted", "name": name}
+    except WorkspaceError as exc:
+        raise HTTPException(400, str(exc))
 
 @app.post("/api/runs", status_code=202)
 async def create_run(body: RunCreate):

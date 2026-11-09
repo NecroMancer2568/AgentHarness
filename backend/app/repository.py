@@ -1,4 +1,5 @@
 import asyncio
+import io
 import json
 import os
 import re
@@ -7,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import time
+import zipfile
 from pathlib import Path
 from typing import Any
 from .config import Settings
@@ -352,31 +354,295 @@ class RepositoryManager:
         settings.repos_root.mkdir(parents=True, exist_ok=True)
         settings.runs_root.mkdir(parents=True, exist_ok=True)
 
+    def _sanitize_repo_name(self, name: str) -> str:
+        name = name.strip()
+        if name.endswith(".git"):
+            name = name[:-4]
+        name = re.sub(r"[^a-zA-Z0-9._-]", "-", name)
+        name = name.strip(".-")
+        if not name:
+            raise WorkspaceError("Invalid repository name. Use letters, numbers, hyphens, or underscores.")
+        return name
+
+    def _ensure_git_repository(self, target: Path, commit_message: str = "Initial repository baseline") -> None:
+        target = target.resolve()
+        git_dir = target / ".git"
+        if git_dir.exists() and git_dir.is_dir():
+            res = subprocess.run(["git", "rev-parse", "--verify", "HEAD"], cwd=target, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if res.returncode == 0:
+                return
+            # Has .git but no commits
+            try:
+                subprocess.run(["git", "config", "user.name", "AgentHarness"], cwd=target, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.run(["git", "config", "user.email", "agentharness@local.invalid"], cwd=target, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.run(["git", "add", "-A"], cwd=target, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.run(["git", "commit", "-q", "-m", commit_message], cwd=target, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except subprocess.CalledProcessError as exc:
+                raise WorkspaceError(f"Failed to commit initial Git baseline: {exc}")
+            return
+
+        try:
+            subprocess.run(["git", "init", "-q"], cwd=target, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(["git", "config", "user.name", "AgentHarness"], cwd=target, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(["git", "config", "user.email", "agentharness@local.invalid"], cwd=target, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(["git", "add", "-A"], cwd=target, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(["git", "commit", "-q", "-m", commit_message], cwd=target, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except subprocess.CalledProcessError as exc:
+            raise WorkspaceError(f"Failed to initialize Git repository in {target.name}: {exc}")
+
     def list_repositories(self) -> list[dict[str, str]]:
         result = []
         for path in sorted(self.settings.repos_root.iterdir()):
-            if path.is_dir() and (path / ".git").exists():
-                result.append({"name": path.name, "path": str(path.resolve())})
+            if path.is_dir() and not path.name.startswith("."):
+                if not (path / ".git").exists():
+                    try:
+                        self._ensure_git_repository(path)
+                    except Exception:
+                        pass
+                if (path / ".git").exists():
+                    result.append({"name": path.name, "path": str(path.resolve())})
         return result
 
     def register_path(self, raw_path: str) -> dict[str, str]:
         path = Path(raw_path).expanduser().resolve()
         root = self.settings.repos_root.resolve()
-        try: path.relative_to(root)
-        except ValueError: raise WorkspaceError(f"Repository must be inside the configured repositories root: {root}")
-        if not path.is_dir() or not (path / ".git").exists():
-            raise WorkspaceError("Path must be an existing Git repository inside the repositories root.")
+        try:
+            path.relative_to(root)
+        except ValueError:
+            raise WorkspaceError(f"Repository must be inside the configured repositories root: {root}")
+        if not path.is_dir():
+            raise WorkspaceError("Path must be an existing directory inside the repositories root.")
+        self._ensure_git_repository(path, f"Registered {path.name}")
         return {"name": path.name, "path": str(path)}
 
     def resolve_repository(self, name_or_path: str) -> Path:
         root = self.settings.repos_root.resolve()
         candidate = Path(name_or_path).expanduser()
         path = (root / candidate).resolve() if not candidate.is_absolute() else candidate.resolve()
-        try: path.relative_to(root)
-        except ValueError: raise WorkspaceError("Repository path is outside the configured repositories root.")
-        if not path.is_dir() or not (path / ".git").exists():
-            raise WorkspaceError(f"Git repository not found inside {root}: {name_or_path}")
+        try:
+            path.relative_to(root)
+        except ValueError:
+            raise WorkspaceError("Repository path is outside the configured repositories root.")
+        if not path.is_dir():
+            raise WorkspaceError(f"Repository directory not found inside {root}: {name_or_path}")
+        self._ensure_git_repository(path, f"Initialized {path.name}")
         return path
+
+    def _normalize_git_url(self, raw_url: str, branch: str | None = None) -> tuple[str, str | None, str]:
+        """
+        Normalize various GitHub/Git URL formats into (clone_url, branch, default_repo_name).
+        Handles:
+          - git clone https://github.com/owner/repo
+          - https://github.com/owner/repo.git
+          - https://github.com/owner/repo
+          - https://github.com/owner/repo/tree/branch-name
+          - https://github.com/owner/repo/blob/branch-name/path/file.py
+          - github.com/owner/repo
+          - owner/repo
+          - git@github.com:owner/repo.git
+          - file:///path/to/repo
+        """
+        url = raw_url.strip()
+        if url.startswith("git clone "):
+            url = url[len("git clone "):].strip()
+        url = url.strip("'\"")
+
+        if url.startswith("github.com/") or url.startswith("gitlab.com/"):
+            url = f"https://{url}"
+        elif "/" in url and not (url.startswith("http://") or url.startswith("https://") or url.startswith("git@") or url.startswith("ssh://") or url.startswith("file://")):
+            parts = url.strip("/").split("/")
+            if len(parts) == 2 and not any(c in url for c in " :\\"):
+                url = f"https://github.com/{url}"
+
+        detected_branch = branch
+        gh_tree_match = re.match(r"^(https?://github\.com/[^/]+/[^/]+)/(?:tree|blob)/([^/]+)(?:/.*)?$", url)
+        if gh_tree_match:
+            url = gh_tree_match.group(1)
+            if not detected_branch:
+                detected_branch = gh_tree_match.group(2)
+
+        if not (url.startswith("https://") or url.startswith("http://") or url.startswith("git@") or url.startswith("ssh://") or url.startswith("file://")):
+            raise WorkspaceError("Invalid Git repository URL. Provide a valid GitHub link (e.g. https://github.com/owner/repo or owner/repo).")
+
+        cleaned = url.rstrip("/")
+        if cleaned.endswith(".git"):
+            cleaned = cleaned[:-4]
+        path_part = cleaned.split("/")[-1]
+        if ":" in path_part:
+            path_part = path_part.split(":")[-1]
+
+        default_name = self._sanitize_repo_name(path_part)
+        return url, detected_branch, default_name
+
+    async def clone_repository(self, url: str, custom_name: str | None = None, branch: str | None = None) -> dict[str, str]:
+        clone_url, target_branch, default_name = self._normalize_git_url(url, branch)
+        repo_name = self._sanitize_repo_name(custom_name) if custom_name and custom_name.strip() else default_name
+
+        target = (self.settings.repos_root / repo_name).resolve()
+        root = self.settings.repos_root.resolve()
+        try:
+            target.relative_to(root)
+        except ValueError:
+            raise WorkspaceError("Target repository path is outside repositories root.")
+
+        if target.exists():
+            if (target / ".git").exists():
+                raise WorkspaceError(f"A repository named '{repo_name}' already exists in workspace/repositories. Delete it or specify a custom name.")
+            else:
+                shutil.rmtree(target, ignore_errors=True)
+
+        cmd = ["git", "clone", "--depth", "1", "--quiet"]
+        if target_branch and target_branch.strip():
+            cmd.extend(["--branch", target_branch.strip()])
+        cmd.extend([clone_url, str(target)])
+
+        env = os.environ.copy()
+        env["GIT_TERMINAL_PROMPT"] = "0"
+
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=180)
+        except asyncio.TimeoutError:
+            proc.kill()
+            if target.exists():
+                shutil.rmtree(target, ignore_errors=True)
+            raise WorkspaceError("Git clone timed out after 3 minutes. Please check your internet connection or repository URL.")
+
+        if proc.returncode != 0:
+            if target.exists():
+                shutil.rmtree(target, ignore_errors=True)
+            err_msg = stderr.decode(errors="replace").strip()
+            if "could not read Username" in err_msg or "Authentication failed" in err_msg:
+                raise WorkspaceError("Repository is private or requires authentication. Only public repositories or configured SSH keys are supported.")
+            if "Remote branch" in err_msg and "not found" in err_msg:
+                raise WorkspaceError(f"Branch '{target_branch}' not found in repository.")
+            raise WorkspaceError(f"Failed to clone repository: {err_msg or 'Git clone failed.'}")
+
+        self._ensure_git_repository(target, f"Initial clone of {clone_url}")
+        return {"name": repo_name, "path": str(target)}
+
+    async def import_zip(self, zip_bytes: bytes, filename: str, custom_name: str | None = None) -> dict[str, str]:
+        if custom_name and custom_name.strip():
+            repo_name = self._sanitize_repo_name(custom_name)
+        else:
+            base = Path(filename).stem
+            if base.endswith(".tar"):
+                base = Path(base).stem
+            repo_name = self._sanitize_repo_name(base)
+
+        target = (self.settings.repos_root / repo_name).resolve()
+        root = self.settings.repos_root.resolve()
+        try:
+            target.relative_to(root)
+        except ValueError:
+            raise WorkspaceError("Target repository path is invalid.")
+
+        if target.exists():
+            raise WorkspaceError(f"A repository named '{repo_name}' already exists in workspace/repositories.")
+
+        try:
+            with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+                bad_file = zf.testzip()
+                if bad_file:
+                    raise WorkspaceError(f"Corrupted zip archive: error in {bad_file}")
+
+                members = zf.infolist()
+                if not members:
+                    raise WorkspaceError("The uploaded zip archive is empty.")
+
+                top_parts = set()
+                for m in members:
+                    p = Path(m.filename).parts
+                    if p:
+                        top_parts.add(p[0])
+                unwrap = (len(top_parts) == 1 and all(len(Path(m.filename).parts) > 1 or m.is_dir() for m in members))
+                strip_prefix = list(top_parts)[0] if unwrap else None
+
+                target.mkdir(parents=True, exist_ok=True)
+                for m in members:
+                    rel_name = m.filename
+                    if strip_prefix and rel_name.startswith(strip_prefix):
+                        rel_name = rel_name[len(strip_prefix):].lstrip("/\\")
+                    if not rel_name:
+                        continue
+                    dest = (target / rel_name).resolve()
+                    try:
+                        dest.relative_to(target)
+                    except ValueError:
+                        raise WorkspaceError(f"Security error: Zip archive entry escapes destination: {m.filename}")
+
+                    if m.is_dir():
+                        dest.mkdir(parents=True, exist_ok=True)
+                    else:
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        with zf.open(m) as src, open(dest, "wb") as dst:
+                            shutil.copyfileobj(src, dst)
+        except Exception as exc:
+            if target.exists():
+                shutil.rmtree(target, ignore_errors=True)
+            if isinstance(exc, WorkspaceError):
+                raise
+            raise WorkspaceError(f"Failed to extract zip archive: {exc}")
+
+        self._ensure_git_repository(target, f"Imported from {filename}")
+        return {"name": repo_name, "path": str(target)}
+
+    async def import_local_folder(self, source_path_str: str, custom_name: str | None = None) -> dict[str, str]:
+        source = Path(source_path_str).expanduser().resolve()
+        if not source.exists() or not source.is_dir():
+            raise WorkspaceError(f"Local folder not found or is not a directory: {source_path_str}")
+
+        if custom_name and custom_name.strip():
+            repo_name = self._sanitize_repo_name(custom_name)
+        else:
+            repo_name = self._sanitize_repo_name(source.name)
+
+        target = (self.settings.repos_root / repo_name).resolve()
+        root = self.settings.repos_root.resolve()
+        try:
+            target.relative_to(root)
+        except ValueError:
+            raise WorkspaceError("Target repository path is invalid.")
+
+        if source == target:
+            self._ensure_git_repository(target, f"Initialized existing folder {repo_name}")
+            return {"name": repo_name, "path": str(target)}
+
+        if target.exists():
+            raise WorkspaceError(f"A repository named '{repo_name}' already exists in workspace/repositories.")
+
+        ignore_fn = shutil.ignore_patterns(".venv", "node_modules", "__pycache__", ".pytest_cache", ".DS_Store", "*.pyc")
+        try:
+            await asyncio.to_thread(shutil.copytree, source, target, ignore=ignore_fn)
+        except Exception as exc:
+            if target.exists():
+                shutil.rmtree(target, ignore_errors=True)
+            raise WorkspaceError(f"Failed to copy local folder: {exc}")
+
+        self._ensure_git_repository(target, f"Imported from {source}")
+        return {"name": repo_name, "path": str(target)}
+
+    def delete_repository(self, name: str) -> None:
+        repo_name = self._sanitize_repo_name(name)
+        target = (self.settings.repos_root / repo_name).resolve()
+        root = self.settings.repos_root.resolve()
+        try:
+            target.relative_to(root)
+        except ValueError:
+            raise WorkspaceError("Invalid repository path.")
+
+        if target == root:
+            raise WorkspaceError("Cannot delete the root repositories directory.")
+
+        if not target.exists():
+            raise WorkspaceError(f"Repository '{repo_name}' not found.")
+
+        shutil.rmtree(target, ignore_errors=False)
 
     async def create_workspace(self, repo: Path, run_id: str) -> Path:
         target = self.settings.runs_root / run_id / "repo"

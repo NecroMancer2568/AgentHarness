@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Activity, ArrowDownRight, ArrowRight, Bot, Check, ChevronRight, CircleDot, Clock3, Code2, Cpu, FileCode2, GitBranch, Gauge, HardDrive, Layers3, Play, Plus, RefreshCw, ShieldCheck, Terminal, Timer, Zap } from 'lucide-react'
+import { Activity, ArrowDownRight, ArrowRight, Bot, Check, CheckCircle2, ChevronRight, CircleDot, Clock3, Code2, Cpu, FileArchive, FileCode2, FolderPlus, GitBranch, Gauge, Globe, HardDrive, Layers3, Play, Plus, RefreshCw, ShieldCheck, Terminal, Timer, Trash2, UploadCloud, Zap } from 'lucide-react'
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import Sidebar, { Page } from './components/Sidebar'
 import { Button, EmptyState, formatDuration, formatNumber, PageHeader, StatCard, StatusPill } from './components/Primitives'
@@ -10,6 +10,7 @@ function App(){
  const [page,setPage]=useState<Page>('overview')
  const [runs,setRuns]=useState<Run[]>([]); const [metrics,setMetrics]=useState<any>({}); const [repos,setRepos]=useState<Repository[]>([]); const [settings,setSettings]=useState<any>({});
  const [loading,setLoading]=useState(true); const [error,setError]=useState(''); const [selectedRunId,setSelectedRunId]=useState(''); const [selectedRun,setSelectedRun]=useState<Run|null>(null); const [events,setEvents]=useState<EventItem[]>([])
+ const [selectedRepoForRun, setSelectedRepoForRun] = useState('')
  const refresh=useCallback(async()=>{try{const [r,m,repo,s]=await Promise.all([api.runs(100),api.metrics(),api.repositories(),api.settings()]);setRuns(r.runs);setMetrics(m);setRepos(repo.repositories);setSettings(s);setError('')}catch(e:any){setError(e.message||'Unable to connect to the API. Start the FastAPI backend.')}finally{setLoading(false)}},[])
  useEffect(()=>{refresh();const t=setInterval(refresh,5000);return()=>clearInterval(t)},[refresh])
  const openRun=useCallback(async(id:string)=>{setSelectedRunId(id);setPage('live');try{const [r,e]=await Promise.all([api.run(id),api.events(id)]);setSelectedRun(r);setEvents(e.events)}catch(e:any){setError(e.message)}},[])
@@ -20,12 +21,12 @@ function App(){
  return <div className="app-shell"><Sidebar page={page} onNavigate={navigate}/><main className="main"><header className="topbar"><div className="breadcrumbs"><span>AgentHarness Lab</span><ChevronRight size={14}/><strong>{navTitles[page]}</strong></div><div className="topbar-right"><span className="cloud-model"><span className="online-dot"/> DeepSeek V4 Pro</span><button className="icon-button" title="Refresh data" onClick={refresh}><RefreshCw size={16}/></button><div className="avatar">AH</div></div></header><div className="content">
  {error&&<div className="error-banner"><CircleDot size={16}/><span>{error}</span><button onClick={refresh}>Retry</button></div>}
  {page==='overview'&&<Overview runs={runs} metrics={metrics} repos={repos} loading={loading} onNavigate={navigate} onOpenRun={openRun}/>}
- {page==='run'&&<RunEvaluation repos={repos} onCreated={async id=>{await refresh();await openRun(id)}}/>}
+ {page==='run'&&<RunEvaluation repos={repos} initialRepo={selectedRepoForRun} onCreated={async id=>{await refresh();await openRun(id)}} onNavigate={navigate}/>}
  {page==='benchmark'&&<BenchmarkPage/>}
  {page==='live'&&<LiveExecution run={selectedRun} events={events} onCancel={async()=>{if(selectedRunId){await api.cancel(selectedRunId);await refresh()}}} onRefresh={refresh}/>}
  {page==='history'&&<RunHistory runs={runs} onOpen={openRun} onNavigate={navigate}/>}
  {page==='metrics'&&<MetricsPage metrics={metrics} runs={runs} onNavigate={navigate}/>}
- {page==='repositories'&&<RepositoriesPage repos={repos} root={settings.repos_root} onRegistered={refresh}/>}
+ {page==='repositories'&&<RepositoriesPage repos={repos} root={settings.repos_root} onRegistered={refresh} onNavigate={navigate} onSelectRepoForRun={r=>setSelectedRepoForRun(r)}/>}
  {page==='models'&&<ModelsPage settings={settings}/>}
  {page==='settings'&&<SettingsPage settings={settings} onRefresh={refresh}/>}
  <footer className="footer"><span>AgentHarness Lab <b>·</b> local-first agent workbench</span><span><span className="online-dot"/> API metrics are sourced from recorded runs</span></footer>
@@ -66,11 +67,11 @@ function BenchmarkPage(){
  function setPageHackOpenRun(id:string){window.dispatchEvent(new CustomEvent('agentharness:open-run',{detail:{id}}))}
 }
 
-function RunEvaluation({repos,onCreated}:{repos:Repository[];onCreated:(id:string)=>void}){
- const [repository,setRepository]=useState(repos[0]?.name||'');const [task,setTask]=useState('Find and fix a reproducible bug. Add or update tests to verify the fix, then explain the changes.');const [testCommand,setTestCommand]=useState('auto');const [maxSteps,setMaxSteps]=useState(8);const [submitting,setSubmitting]=useState(false);const [error,setError]=useState('')
- useEffect(()=>{if(!repository&&repos.length)setRepository(repos[0].name)},[repos,repository])
+function RunEvaluation({repos,initialRepo,onCreated,onNavigate}:{repos:Repository[];initialRepo?:string;onCreated:(id:string)=>void;onNavigate?:(p:Page)=>void}){
+ const [repository,setRepository]=useState(initialRepo||repos[0]?.name||'');const [task,setTask]=useState('Find and fix a reproducible bug. Add or update tests to verify the fix, then explain the changes.');const [testCommand,setTestCommand]=useState('auto');const [maxSteps,setMaxSteps]=useState(8);const [submitting,setSubmitting]=useState(false);const [error,setError]=useState('')
+ useEffect(()=>{if(initialRepo)setRepository(initialRepo);else if(!repository&&repos.length)setRepository(repos[0].name)},[repos,repository,initialRepo])
  const submit=async()=>{setError('');if(!repository){setError('Register or clone a Git repository first.');return}if(task.trim().length<10){setError('Describe the task in at least 10 characters.');return}setSubmitting(true);try{const r=await api.createRun({repository,task:task.trim(),test_command:testCommand,max_agent_steps:maxSteps});onCreated(r.id)}catch(e:any){setError(e.message)}finally{setSubmitting(false)}}
- return <><PageHeader eyebrow="EXECUTION CONFIGURATION" title="Run an evaluation" description="Assign a real engineering task to the multi-agent team. The run uses a disposable clone of the selected Git repository."/><div className="form-layout"><section className="panel form-panel"><div className="form-section-title"><span className="step-index">01</span><div><h2>Task definition</h2><p>Describe the desired change and how to verify it.</p></div></div><label className="field-label">Repository</label><select className="field-control" value={repository} onChange={e=>setRepository(e.target.value)}>{repos.length===0&&<option value="">No repositories registered</option>}{repos.map(r=><option key={r.name} value={r.name}>{r.name} — {r.path}</option>)}</select>{repos.length===0&&<div className="field-hint">Add a Git repository in the Repositories page first.</div>}<label className="field-label">Engineering task</label><textarea className="field-control task-textarea" value={task} onChange={e=>setTask(e.target.value)} placeholder="Describe the bug, feature, or refactor…"/><div className="field-hint">Be specific about expected behavior. Agents inspect the repository before editing.</div><div className="form-divider"/><div className="form-section-title"><span className="step-index">02</span><div><h2>Execution controls</h2><p>Set the verification strategy and tool-call budget.</p></div></div><label className="field-label">Test command</label><select className="field-control" value={testCommand} onChange={e=>setTestCommand(e.target.value)}><option value="auto">Auto-detect repository test runner</option><option value="pytest">pytest</option><option value="python -m pytest">python -m pytest</option><option value="npm test">npm test</option><option value="npm run test">npm run test</option><option value="cargo test">cargo test</option><option value="go test ./...">go test ./...</option><option value="mvn test">mvn test</option><option value="gradle test">gradle test</option></select><label className="field-label">Maximum tool steps per agent <b>{maxSteps}</b></label><input className="range-input" type="range" min="2" max="16" value={maxSteps} onChange={e=>setMaxSteps(Number(e.target.value))}/><div className="range-labels"><span>2 · Faster / smaller budget</span><span>16 · More investigation</span></div>{error&&<div className="inline-error">{error}</div>}<div className="form-actions"><span><ShieldCheck size={15}/> Runs inside a disposable local clone</span><Button onClick={submit} disabled={submitting||repos.length===0}>{submitting?'Starting…':'Start agent run'} <ArrowRight size={15}/></Button></div></section><aside className="panel run-sidebar"><div className="side-card-heading"><Layers3 size={17}/><h3>Agent workflow</h3></div>{[{n:'01',title:'Coordinator',desc:'Plans task and routes specialist review'},{n:'02',title:'Repository analyst',desc:'Inspects code and gathers evidence'},{n:'03',title:'Test scout',desc:'Finds test framework and regressions'},{n:'04',title:'Coding agent',desc:'Implements changes in isolated clone'},{n:'05',title:'Test & debug',desc:'Runs actual tests and diagnoses failures'},{n:'06',title:'Code reviewer',desc:'Reviews diff and verification evidence'}].map(a=><div className="workflow-item" key={a.n}><span>{a.n}</span><div><strong>{a.title}</strong><small>{a.desc}</small></div></div>)}<div className="note-box"><Zap size={15}/><span>Read-only discovery agents can run concurrently. Implementation, testing, and review follow dependency order.</span></div></aside></div></>
+ return <><PageHeader eyebrow="EXECUTION CONFIGURATION" title="Run an evaluation" description="Assign a real engineering task to the multi-agent team. The run uses a disposable clone of the selected Git repository."/><div className="form-layout"><section className="panel form-panel"><div className="form-section-title"><span className="step-index">01</span><div><h2>Task definition</h2><p>Describe the desired change and how to verify it.</p></div></div><label className="field-label">Repository</label><select className="field-control" value={repository} onChange={e=>setRepository(e.target.value)}>{repos.length===0&&<option value="">No repositories registered</option>}{repos.map(r=><option key={r.name} value={r.name}>{r.name} — {r.path}</option>)}</select>{repos.length===0&&<div className="field-hint">No repositories found in workspace. <button type="button" className="text-button" style={{display:'inline',cursor:'pointer',padding:0}} onClick={()=>onNavigate?.('repositories')}>Add or clone a repository <ArrowRight size={11}/></button></div>}<label className="field-label">Engineering task</label><textarea className="field-control task-textarea" value={task} onChange={e=>setTask(e.target.value)} placeholder="Describe the bug, feature, or refactor…"/><div className="field-hint">Be specific about expected behavior. Agents inspect the repository before editing.</div><div className="form-divider"/><div className="form-section-title"><span className="step-index">02</span><div><h2>Execution controls</h2><p>Set the verification strategy and tool-call budget.</p></div></div><label className="field-label">Test command</label><select className="field-control" value={testCommand} onChange={e=>setTestCommand(e.target.value)}><option value="auto">Auto-detect repository test runner</option><option value="pytest">pytest</option><option value="python -m pytest">python -m pytest</option><option value="npm test">npm test</option><option value="npm run test">npm run test</option><option value="cargo test">cargo test</option><option value="go test ./...">go test ./...</option><option value="mvn test">mvn test</option><option value="gradle test">gradle test</option></select><label className="field-label">Maximum tool steps per agent <b>{maxSteps}</b></label><input className="range-input" type="range" min="2" max="16" value={maxSteps} onChange={e=>setMaxSteps(Number(e.target.value))}/><div className="range-labels"><span>2 · Faster / smaller budget</span><span>16 · More investigation</span></div>{error&&<div className="inline-error">{error}</div>}<div className="form-actions"><span><ShieldCheck size={15}/> Runs inside a disposable local clone</span><Button onClick={submit} disabled={submitting||repos.length===0}>{submitting?'Starting…':'Start agent run'} <ArrowRight size={15}/></Button></div></section><aside className="panel run-sidebar"><div className="side-card-heading"><Layers3 size={17}/><h3>Agent workflow</h3></div>{[{n:'01',title:'Coordinator',desc:'Plans task and routes specialist review'},{n:'02',title:'Repository analyst',desc:'Inspects code and gathers evidence'},{n:'03',title:'Test scout',desc:'Finds test framework and regressions'},{n:'04',title:'Coding agent',desc:'Implements changes in isolated clone'},{n:'05',title:'Test & debug',desc:'Runs actual tests and diagnoses failures'},{n:'06',title:'Code reviewer',desc:'Reviews diff and verification evidence'}].map(a=><div className="workflow-item" key={a.n}><span>{a.n}</span><div><strong>{a.title}</strong><small>{a.desc}</small></div></div>)}<div className="note-box"><Zap size={15}/><span>Read-only discovery agents can run concurrently. Implementation, testing, and review follow dependency order.</span></div></aside></div></>
 }
 
 function LiveExecution({run,events,onCancel,onRefresh}:{run:Run|null;events:EventItem[];onCancel:()=>void;onRefresh:()=>void}){
@@ -85,7 +86,257 @@ function RunHistory({runs,onOpen,onNavigate}:{runs:Run[];onOpen:(id:string)=>voi
 
 function MetricsPage({metrics,runs,onNavigate}:{metrics:any;runs:Run[];onNavigate:(p:Page)=>void}){const completed=runs.filter(r=>r.status==='succeeded'||r.status==='failed');const data=completed.slice(0,20).reverse().map((r,i)=>({run:`${i+1}`,tokens:r.total_tokens||0,seconds:r.duration_ms?Math.round(r.duration_ms/1000):0,success:r.success?1:0}));return <><PageHeader eyebrow="ENGINEERING TELEMETRY" title="Metrics & reports" description="Operational metrics calculated from actual recorded runs. No sample or hardcoded execution results." action={<Button kind="secondary" onClick={()=>onNavigate('history')}>View run history <ArrowRight size={15}/></Button>}/><div className="stats-grid"><StatCard label="Verified success rate" value={metrics.success_rate==null?'—':`${metrics.success_rate}%`} detail={`${metrics.successful_runs||0} successful / ${metrics.completed_runs||0} completed`} icon={ShieldCheck} tone="green"/><StatCard label="Average wall-clock time" value={formatDuration(metrics.average_duration_ms)} detail={`p95 ${formatDuration(metrics.p95_duration_ms)}`} icon={Timer} tone="blue"/><StatCard label="Input tokens" value={formatNumber(metrics.prompt_tokens)} detail="Provider-reported prompt tokens" icon={ArrowDownRight} tone="violet"/><StatCard label="Output tokens" value={formatNumber(metrics.completion_tokens)} detail="Provider-reported completion tokens" icon={Zap} tone="amber"/></div><div className="overview-grid"><section className="panel chart-panel"><div className="panel-heading"><div><h2>Token use by completed run</h2><p>Most recent completed executions</p></div></div>{data.length?<div className="chart-wrap"><ResponsiveContainer width="100%" height="100%"><AreaChart data={data}><CartesianGrid strokeDasharray="3 4" stroke="#232a36" vertical={false}/><XAxis dataKey="run" tick={{fill:'#798497',fontSize:11}} axisLine={false} tickLine={false}/><YAxis tick={{fill:'#798497',fontSize:11}} axisLine={false} tickLine={false}/><Tooltip contentStyle={{background:'#141923',border:'1px solid #2b3444',borderRadius:10,color:'#eef2fa'}}/><Area dataKey="tokens" name="Total tokens" stroke="#a58bfa" fill="#a58bfa" fillOpacity={0.14}/></AreaChart></ResponsiveContainer></div>:<EmptyState title="Metrics appear after runs" body="Run tasks to collect provider-reported token and timing data." action={<Button onClick={()=>onNavigate('run')}>Run an evaluation</Button>}/>}</section><section className="panel"><div className="panel-heading"><div><h2>What these numbers mean</h2><p>Interpretation notes</p></div></div><div className="metric-explain"><strong>Verified success</strong><p>A run is marked successful only if a configured test command passes and the code reviewer explicitly approves the diff.</p></div><div className="metric-explain"><strong>Wall-clock time</strong><p>Includes orchestration, provider latency, tool execution, tests, and review.</p></div><div className="metric-explain"><strong>Token counts</strong><p>Reported by the model API. They can include repeated context and internal reasoning tokens if the provider includes them in usage.</p></div><div className="metric-explain"><strong>Important limitation</strong><p>Task success is a useful operational signal, not a guarantee of correctness. Inspect tests and diffs before using CV claims.</p></div></section></div><div className="note-box wide-note"><ShieldCheck size={16}/><span>CV numbers should be computed from a documented task set and include the number of runs, success criteria, and measurement method.</span></div></>}
 
-function RepositoriesPage({repos,root,onRegistered}:{repos:Repository[];root:string;onRegistered:()=>void}){const [path,setPath]=useState('');const [error,setError]=useState('');const [busy,setBusy]=useState(false);const register=async()=>{setError('');setBusy(true);try{await api.registerRepository(path);setPath('');onRegistered()}catch(e:any){setError(e.message)}finally{setBusy(false)}};return <><PageHeader eyebrow="LOCAL WORKSPACES" title="Repositories" description="Only repositories under the configured root can be used for execution."/><div className="repository-layout"><section className="panel"><div className="panel-heading"><div><h2>Available Git repositories</h2><p>{repos.length} registered repositories</p></div><GitBranch size={17}/></div>{repos.length?<div className="repo-list">{repos.map(r=><div className="repo-row" key={r.path}><div className="repo-icon"><GitBranch size={17}/></div><div className="repo-info"><strong>{r.name}</strong><span>{r.path}</span></div><span className="repo-ready"><span className="online-dot"/> Ready</span></div>)}</div>:<EmptyState title="No repositories found" body="Clone a Git repository into the root directory, commit the starting state, then refresh this page."/>}</section><section className="panel add-repo-panel"><div className="side-card-heading"><Plus size={17}/><h3>Register a repository</h3></div><p className="muted">Enter the absolute path to an existing Git repository inside the allowed root.</p><label className="field-label">Repository path</label><input className="field-control" value={path} onChange={e=>setPath(e.target.value)} placeholder={`${root||'…/workspace/repositories'}/my-project`}/>{error&&<div className="inline-error">{error}</div>}<Button onClick={register} disabled={busy||!path.trim()}>{busy?'Registering…':'Register repository'} <ArrowRight size={15}/></Button><div className="note-box"><ShieldCheck size={15}/><span>The backend validates repository paths against the configured root before cloning.</span></div></section></div><div className="panel root-panel"><div><HardDrive size={17}/><span>Allowed repository root</span></div><code>{root||'Loading…'}</code></div></>}
+function RepositoriesPage({repos,root,onRegistered,onNavigate,onSelectRepoForRun}:{repos:Repository[];root:string;onRegistered:()=>void;onNavigate:(p:Page)=>void;onSelectRepoForRun:(r:string)=>void}){
+  const [tab, setTab] = useState<'github'|'zip'|'folder'>('github')
+  const [gitUrl, setGitUrl] = useState('')
+  const [gitBranch, setGitBranch] = useState('')
+  const [gitName, setGitName] = useState('')
+
+  const [zipFile, setZipFile] = useState<File|null>(null)
+  const [zipName, setZipName] = useState('')
+
+  const [folderPath, setFolderPath] = useState('')
+  const [folderName, setFolderName] = useState('')
+
+  const [error, setError] = useState('')
+  const [success, setSuccess] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [busyMsg, setBusyMsg] = useState('')
+
+  const handleClone = async () => {
+    if (!gitUrl.trim()) { setError('Enter a valid GitHub or Git repository URL.'); return }
+    setError(''); setSuccess(''); setBusy(true); setBusyMsg('Cloning repository from Git...')
+    try {
+      const res = await api.cloneRepository(gitUrl.trim(), gitName.trim() || undefined, gitBranch.trim() || undefined)
+      setGitUrl(''); setGitBranch(''); setGitName('')
+      setSuccess(`Repository '${res.repository.name}' cloned successfully!`)
+      onRegistered()
+    } catch (e: any) {
+      setError(e.message)
+    } finally {
+      setBusy(false); setBusyMsg('')
+    }
+  }
+
+  const handleUploadZip = async () => {
+    if (!zipFile) { setError('Select a .zip archive to upload.'); return }
+    setError(''); setSuccess(''); setBusy(true); setBusyMsg('Uploading and extracting zip archive...')
+    try {
+      const res = await api.uploadZip(zipFile, zipName.trim() || undefined)
+      setZipFile(null); setZipName('')
+      setSuccess(`Repository '${res.repository.name}' imported successfully from zip!`)
+      onRegistered()
+    } catch (e: any) {
+      setError(e.message)
+    } finally {
+      setBusy(false); setBusyMsg('')
+    }
+  }
+
+  const handleImportFolder = async () => {
+    if (!folderPath.trim()) { setError('Enter the path to a local directory.'); return }
+    setError(''); setSuccess(''); setBusy(true); setBusyMsg('Importing and initializing folder...')
+    try {
+      const res = await api.importFolder(folderPath.trim(), folderName.trim() || undefined)
+      setFolderPath(''); setFolderName('')
+      setSuccess(`Repository '${res.repository.name}' imported successfully!`)
+      onRegistered()
+    } catch (e: any) {
+      setError(e.message)
+    } finally {
+      setBusy(false); setBusyMsg('')
+    }
+  }
+
+  const handleDelete = async (name: string) => {
+    if (!confirm(`Are you sure you want to remove '${name}' from workspace repositories?`)) return
+    setError(''); setSuccess('')
+    try {
+      await api.deleteRepository(name)
+      setSuccess(`Repository '${name}' removed.`)
+      onRegistered()
+    } catch (e: any) {
+      setError(e.message)
+    }
+  }
+
+  return <>
+    <PageHeader
+      eyebrow="LOCAL WORKSPACES"
+      title="Repositories"
+      description="Add GitHub repositories by link, upload .zip project archives, or import local folders. Each project gets an isolated Git baseline for automated evaluations."
+    />
+    <div className="repository-layout">
+      <section className="panel">
+        <div className="panel-heading">
+          <div>
+            <h2>Available Repositories</h2>
+            <p>{repos.length} ready for evaluation</p>
+          </div>
+          <GitBranch size={17}/>
+        </div>
+        {success && <div className="success-banner"><CheckCircle2 size={16}/><span>{success}</span></div>}
+        {repos.length ? (
+          <div className="repo-list">
+            {repos.map(r => (
+              <div className="repo-row" key={r.path}>
+                <div className="repo-icon"><GitBranch size={17}/></div>
+                <div className="repo-info">
+                  <strong>{r.name}</strong>
+                  <span>{r.path}</span>
+                </div>
+                <div className="repo-actions">
+                  <button className="repo-btn" onClick={() => { onSelectRepoForRun(r.name); onNavigate('run') }} title="Run evaluation on this repository">
+                    <Play size={12}/> Run evaluation
+                  </button>
+                  <button className="repo-btn danger" onClick={() => handleDelete(r.name)} title="Remove repository">
+                    <Trash2 size={12}/>
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <EmptyState
+            title="No repositories found"
+            body="Use the panel on the right to clone a GitHub repo, upload a .zip, or import a folder."
+          />
+        )}
+      </section>
+
+      <section className="panel add-repo-panel">
+        <div className="side-card-heading">
+          <Plus size={17}/>
+          <h3>Add a repository</h3>
+        </div>
+        <p className="muted">Choose how you want to add code to the evaluation workspace.</p>
+
+        <div className="repo-tabs">
+          <button className={`repo-tab ${tab==='github'?'active':''}`} onClick={() => { setTab('github'); setError('') }}>
+            <Globe size={13}/> GitHub link
+          </button>
+          <button className={`repo-tab ${tab==='zip'?'active':''}`} onClick={() => { setTab('zip'); setError('') }}>
+            <FileArchive size={13}/> Upload .ZIP
+          </button>
+          <button className={`repo-tab ${tab==='folder'?'active':''}`} onClick={() => { setTab('folder'); setError('') }}>
+            <FolderPlus size={13}/> Local folder
+          </button>
+        </div>
+
+        {tab === 'github' && (
+          <div>
+            <label className="field-label">GitHub or Git repository URL</label>
+            <input
+              className="field-control"
+              value={gitUrl}
+              onChange={e => setGitUrl(e.target.value)}
+              placeholder="https://github.com/owner/repository"
+              disabled={busy}
+            />
+            <label className="field-label">Branch / Tag (optional)</label>
+            <input
+              className="field-control"
+              value={gitBranch}
+              onChange={e => setGitBranch(e.target.value)}
+              placeholder="main, master, v1.0 (default branch if blank)"
+              disabled={busy}
+            />
+            <label className="field-label">Custom name (optional)</label>
+            <input
+              className="field-control"
+              value={gitName}
+              onChange={e => setGitName(e.target.value)}
+              placeholder="my-custom-repo-name"
+              disabled={busy}
+            />
+            {error && <div className="inline-error">{error}</div>}
+            <Button onClick={handleClone} disabled={busy || !gitUrl.trim()}>
+              {busy ? (busyMsg || 'Cloning...') : 'Clone repository'} <ArrowRight size={15}/>
+            </Button>
+          </div>
+        )}
+
+        {tab === 'zip' && (
+          <div>
+            <label className="field-label">Select .zip project archive</label>
+            <label className="file-dropzone">
+              <input
+                type="file"
+                accept=".zip"
+                style={{ display: 'none' }}
+                onChange={e => {
+                  if (e.target.files?.[0]) {
+                    setZipFile(e.target.files[0])
+                    setError('')
+                  }
+                }}
+                disabled={busy}
+              />
+              <div className="file-dropzone-icon"><UploadCloud size={20}/></div>
+              <strong>{zipFile ? 'Click to change file' : 'Click or drop .zip file here'}</strong>
+              <span>Supports GitHub repo zip exports and source archives up to 250MB</span>
+            </label>
+            {zipFile && (
+              <div className="file-selected">
+                <FileArchive size={16}/>
+                <strong>{zipFile.name}</strong>
+                <small>{(zipFile.size / 1024 / 1024).toFixed(2)} MB</small>
+              </div>
+            )}
+            <label className="field-label">Custom repository name (optional)</label>
+            <input
+              className="field-control"
+              value={zipName}
+              onChange={e => setZipName(e.target.value)}
+              placeholder="e.g. my-extracted-project"
+              disabled={busy}
+            />
+            {error && <div className="inline-error">{error}</div>}
+            <Button onClick={handleUploadZip} disabled={busy || !zipFile}>
+              {busy ? (busyMsg || 'Extracting...') : 'Upload & extract'} <ArrowRight size={15}/>
+            </Button>
+          </div>
+        )}
+
+        {tab === 'folder' && (
+          <div>
+            <label className="field-label">Local folder path</label>
+            <input
+              className="field-control"
+              value={folderPath}
+              onChange={e => setFolderPath(e.target.value)}
+              placeholder="/Users/username/projects/my-app"
+              disabled={busy}
+            />
+            <div className="field-hint">Any directory on your computer. It will be safely copied and initialized with Git if needed.</div>
+            <label className="field-label">Custom name (optional)</label>
+            <input
+              className="field-control"
+              value={folderName}
+              onChange={e => setFolderName(e.target.value)}
+              placeholder="e.g. imported-app"
+              disabled={busy}
+            />
+            {error && <div className="inline-error">{error}</div>}
+            <Button onClick={handleImportFolder} disabled={busy || !folderPath.trim()}>
+              {busy ? (busyMsg || 'Importing...') : 'Import folder'} <ArrowRight size={15}/>
+            </Button>
+          </div>
+        )}
+
+        <div className="note-box">
+          <ShieldCheck size={15}/>
+          <span>Repositories are automatically prepared with a Git baseline so the multi-agent runner can create clean isolated workspaces.</span>
+        </div>
+      </section>
+    </div>
+
+    <div className="panel root-panel">
+      <div><HardDrive size={17}/><span>Workspace repositories storage directory</span></div>
+      <code>{root || 'Loading…'}</code>
+    </div>
+  </>
+}
 
 function ModelsPage({settings}:{settings:any}){return <><PageHeader eyebrow="INFERENCE CONFIGURATION" title="Ollama Cloud & model" description="The project uses one fixed model so performance metrics reflect harness behavior, not model comparisons."/><div className="model-hero panel"><div className="model-symbol"><Bot size={28}/></div><div className="model-info"><div className="model-tags"><span className="tag green-tag">Configured model</span><span className="tag">Cloud inference</span></div><h2>DeepSeek V4 Pro</h2><p>{settings.model||'deepseek-v4-pro:cloud'}</p><div className="model-meta"><span><span className="online-dot"/>{settings.api_key_configured?'API key configured':'API key missing'}</span><span><Layers3 size={14}/> Ollama Cloud OpenAI-compatible endpoint</span></div></div></div><div className="settings-grid"><div className="panel settings-card"><div className="settings-card-head"><Cpu size={17}/><h3>Provider</h3></div><div className="setting-row"><span>Base URL</span><code>{settings.base_url||'https://ollama.com/v1'}</code></div><div className="setting-row"><span>Model identifier</span><code>{settings.model||'deepseek-v4-pro:cloud'}</code></div><div className="setting-row"><span>API key</span><strong>{settings.api_key_configured?'Configured in backend/.env':'Not configured'}</strong></div></div><div className="panel settings-card"><div className="settings-card-head"><Gauge size={17}/><h3>Execution limits</h3></div><div className="setting-row"><span>Max agent tool steps</span><strong>{settings.max_agent_steps??'—'}</strong></div><div className="setting-row"><span>Concurrent read agents</span><strong>{settings.max_parallel_readers??'—'}</strong></div><div className="setting-row"><span>Test timeout</span><strong>{settings.test_timeout_seconds??'—'} s</strong></div></div></div><div className="note-box wide-note"><ShieldCheck size={16}/><span>Do not put provider keys in frontend environment variables. The backend reads OLLAMA_API_KEY from backend/.env and never returns the secret to the browser.</span></div></>}
 

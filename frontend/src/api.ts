@@ -11,6 +11,17 @@ export const api = {
   health:()=>request<any>('/api/health'), metrics:()=>request<any>('/api/metrics'),
   settings:()=>request<any>('/api/settings'), repositories:()=>request<{repositories:Repository[];root:string}>('/api/repositories'),
   registerRepository:(path:string)=>request<any>('/api/repositories/register',{method:'POST',body:JSON.stringify({path})}),
+  cloneRepository:(url:string, name?:string, branch?:string)=>request<any>('/api/repositories/clone',{method:'POST',body:JSON.stringify({url, name: name||undefined, branch: branch||undefined})}),
+  uploadZip:async(file:File, name?:string)=>{
+    const fd = new FormData()
+    fd.append('file', file)
+    if(name) fd.append('name', name)
+    const res = await fetch(`${API}/api/repositories/upload-zip`, {method:'POST', body:fd})
+    if(!res.ok){const body=await res.json().catch(()=>({detail:res.statusText})); throw new Error(body.detail||body.error||`HTTP ${res.status}`)}
+    return res.json()
+  },
+  importFolder:(path:string, name?:string)=>request<any>('/api/repositories/import-folder',{method:'POST',body:JSON.stringify({path, name: name||undefined})}),
+  deleteRepository:(name:string)=>request<any>(`/api/repositories/${encodeURIComponent(name)}`,{method:'DELETE'}),
   runs:(limit=50)=>request<{runs:Run[]}>(`/api/runs?limit=${limit}`),
   run:(id:string)=>request<Run>(`/api/runs/${id}`),
   events:(id:string, after=0)=>request<{events:EventItem[]}>(`/api/runs/${id}/events?after_id=${after}`),
