@@ -31,6 +31,11 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="AgentHarness Lab API", version="1.0.0", description="Local multi-agent software engineering workbench", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins, allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
+@app.get("/")
+@app.get("/health")
+async def root_health():
+    return {"status": "ok", "service": "agentharness-lab-backend"}
+
 @app.get("/api/health", response_model=HealthOut)
 async def health():
     configured = bool(settings.ollama_api_key) or settings.is_local_ollama

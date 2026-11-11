@@ -1,4 +1,6 @@
-const API = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
+const API = import.meta.env.VITE_API_BASE_URL !== undefined
+  ? import.meta.env.VITE_API_BASE_URL
+  : (import.meta.env.DEV ? 'http://127.0.0.1:8000' : '')
 export type Run = {id:string; repository:string; task:string; status:string; created_at:string; updated_at:string; duration_ms:number|null; success:boolean|null; total_tokens:number; prompt_tokens:number; completion_tokens:number; llm_calls:number; error?:string|null; result?:any; metrics?:any; workspace_path?:string; events?:EventItem[]}
 export type EventItem = {id:number; run_id:string; timestamp:string; event_type:string; agent?:string|null; message:string; data:Record<string,any>}
 export type Repository = {name:string; path:string}

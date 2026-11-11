@@ -1,0 +1,13 @@
+.git
+.DS_Store
+.env
+*.env
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+*.sqlite3
+*.db
+agentharness.db
+evaluations/runs/
+

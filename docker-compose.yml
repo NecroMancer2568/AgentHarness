@@ -1,0 +1,128 @@
+# ==============================================================================
+# AgentHarness Lab — Docker Compose Local Development Stack
+# ==============================================================================
+# Start complete stack:       docker compose up --build
+# Start in background:         docker compose up -d --build
+# Initialize local model:      docker compose --profile setup up model-init
+# Stop stack:                  docker compose down
+# Stop and remove volumes:     docker compose down -v
+# ==============================================================================
+
+services:
+  # ----------------------------------------------------------------------------
+  # 1. Frontend: React + Vite production build served via Nginx with API reverse proxy
+  # ----------------------------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: agentharness-frontend:latest
+    container_name: agentharness-frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-5173}:80"
+    environment:
+      PORT: "80"
+      BACKEND_URL: "http://backend:8000"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - agentharness-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:80/healthz || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  # ----------------------------------------------------------------------------
+  # 2. Backend: FastAPI multi-agent execution orchestrator & tools runtime
+  # ----------------------------------------------------------------------------
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: agentharness-backend:latest
+    container_name: agentharness-backend
+    restart: unless-stopped
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    environment:
+      PORT: "8000"
+      OLLAMA_BASE_URL: "${OLLAMA_BASE_URL:-http://ollama:11434/v1}"
+      OLLAMA_MODEL: "${OLLAMA_MODEL:-gemma4:31b-cloud}"
+      OLLAMA_API_KEY: "${OLLAMA_API_KEY:-}"
+      OLLAMA_TIMEOUT_SECONDS: "${OLLAMA_TIMEOUT_SECONDS:-180}"
+      AGENTHARNESS_CORS_ORIGINS: "${AGENTHARNESS_CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173,http://localhost:8000,http://127.0.0.1:8000,http://localhost,http://127.0.0.1}"
+      AGENTHARNESS_DATABASE: "/app/workspace/agentharness.sqlite3"
+      AGENTHARNESS_REPOS_ROOT: "/app/workspace/repositories"
+      AGENTHARNESS_RUNS_ROOT: "/app/workspace/runs"
+      AGENTHARNESS_VENV_CACHE_ROOT: "/app/workspace/venvs"
+      AGENTHARNESS_MAX_AGENT_STEPS: "${AGENTHARNESS_MAX_AGENT_STEPS:-8}"
+      AGENTHARNESS_MAX_PARALLEL_READERS: "${AGENTHARNESS_MAX_PARALLEL_READERS:-2}"
+      AGENTHARNESS_TEST_TIMEOUT_SECONDS: "${AGENTHARNESS_TEST_TIMEOUT_SECONDS:-180}"
+    volumes:
+      - ${WORKSPACE_PATH:-./workspace}:/app/workspace
+    depends_on:
+      ollama:
+        condition: service_healthy
+    networks:
+      - agentharness-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://127.0.0.1:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ----------------------------------------------------------------------------
+  # 3. Ollama: Dedicated LLM inference service
+  # ----------------------------------------------------------------------------
+  ollama:
+    image: ollama/ollama:latest
+    container_name: agentharness-ollama
+    restart: unless-stopped
+    ports:
+      - "${OLLAMA_PORT:-11434}:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - agentharness-net
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ----------------------------------------------------------------------------
+  # 4. Model-Init: Automated one-shot model puller / provisioning validator
+  # ----------------------------------------------------------------------------
+  model-init:
+    image: curlimages/curl:latest
+    container_name: agentharness-model-init
+    restart: "no"
+    volumes:
+      - ./scripts/init-ollama.sh:/init-ollama.sh:ro
+    environment:
+      OLLAMA_HOST: "http://ollama:11434"
+      OLLAMA_MODEL: "${OLLAMA_MODEL:-gemma4:31b-cloud}"
+    entrypoint: ["/bin/sh", "/init-ollama.sh"]
+    depends_on:
+      ollama:
+        condition: service_healthy
+    networks:
+      - agentharness-net
+    profiles:
+      - setup
+
+volumes:
+  ollama_data:
+    name: agentharness_ollama_data
+
+networks:
+  agentharness-net:
+    name: agentharness-net
+    driver: bridge
+

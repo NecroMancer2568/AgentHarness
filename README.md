@@ -30,6 +30,28 @@ This is a practical engineering project, not a claim of novel research. The metr
 
 ## Quick start (macOS / Linux)
 
+### Option A: Docker Compose (Recommended for reproducible local deployment)
+
+AgentHarness Lab includes a complete multi-container Docker Compose setup for the Frontend, Backend, and Ollama:
+
+```bash
+# 1. Copy environment template
+cp .env.example .env
+
+# 2. Build and launch all services in detached mode
+docker compose up -d --build
+
+# 3. (Optional) Provision the local or cloud LLM model
+./scripts/init-ollama.sh
+```
+
+- **Frontend Dashboard**: <http://localhost:5173>
+- **Backend API & Docs**: <http://localhost:8000/docs>
+- **Backend Health Check**: <http://localhost:8000/health>
+- **Detailed Guide & Cloud Run Deployment**: See [docs/DOCKER_DEPLOYMENT.md](file:///Users/enigma/Downloads/agentharness-lab/docs/DOCKER_DEPLOYMENT.md).
+
+### Option B: Local Virtualenv Setup
+
 From the project root:
 
 ### 1. Configure the backend
