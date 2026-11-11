@@ -1,276 +1,294 @@
 # AgentHarness Lab
 
-A local-first multi-agent software-engineering workbench. It runs LLM-powered agents against real Git repositories, executes allowlisted test commands in disposable clones, records tool traces and token/latency metrics, and exposes the results through a React dashboard.
+**A multi-agent engineering harness for real-world repository tasks.**
 
-**Inference Provider:** [OpenRouter API](https://openrouter.ai) (`https://openrouter.ai/api/v1`).  
-**Models Supported:** Any OpenAI-compatible tool-calling model on OpenRouter (e.g. `anthropic/claude-3.5-sonnet`, `openai/gpt-4o`, `qwen/qwen-2.5-coder-32b-instruct`, `deepseek/deepseek-chat`).  
-**Backend:** Python 3.11+, FastAPI, OpenAI Python SDK, SQLite.  
-**Frontend:** React 18, TypeScript, Vite, Recharts.  
-**Validation:** backend unit tests, real test-runner execution, recorded run-verification rules, and an included Inspect AI task adapter for repeatable task sets.
+AgentHarness Lab is a web application that routes a software task through a coordinated team of AI agents. The agents inspect a Git repository, locate relevant code and tests, implement changes, run verification, and produce a reviewable execution report.
 
-This is a practical engineering project, not a claim of novel research. The metrics are operational measurements from actual executions, not benchmark results baked into the UI.
+The goal is to make agent-driven software engineering observable. A run can expose its status, agent activity, tool calls, token usage, duration, test results, and review outcome—not just a final generated answer.
 
-## What is implemented
+> **Deployment:** React frontend on Cloudflare Pages, FastAPI backend on Northflank, and model inference through OpenRouter.
 
-- LLM-powered coordinator, repository analyst, test scout, coding agent, test/debug agent, and independent code reviewer. A security reviewer is routed in when the coordinator flags security-sensitive work.
-- Dependency-aware execution: repository analysis and test discovery can run concurrently; coding, testing, and review run in order.
-- Adaptive routing, compact structured handoffs, bounded reader concurrency, timeouts, and provider-reported token accounting.
-- Real repository inspection and edits through constrained tools: `list_files`, `read_file`, `search_text`, `write_file`, `run_tests`, and `git_diff`.
-- Disposable Git clone per run. The original repository is not edited by the harness.
-- Explicit test-command allowlist and repository-path boundary checks.
-- SQLite-backed run history, structured events, agent outputs, changed files, diffs, and live polling/SSE endpoints.
-- Dashboard pages for overview, single-task runs, a repeatable benchmark suite, live execution inspector, history, metrics, repositories, model configuration, and settings.
+## Features
 
-## Requirements
+- Submit a repository and describe a bug fix or engineering task.
+- Coordinate specialist agents across repository analysis, test discovery, implementation, debugging, and review.
+- Clone and work against a repository copy.
+- Prepare dependencies and run relevant tests, including pytest for Python repositories.
+- Review the resulting changes and verification evidence.
+- Inspect run status, agent activity, tool calls, token usage, duration, and test metrics in the dashboard.
 
-- Python 3.11+ recommended.
-- Node.js 20+ and npm.
-- Git.
-- An [OpenRouter](https://openrouter.ai) account and API key.
-- Required test runtimes for the repositories you intend to evaluate (for example, Python/pytest, Node/npm, Go, Rust, Maven, or Gradle).
+A successful run depends on the configured verification and review checks passing. A generated patch alone is not treated as proof of success.
 
-## Quick start (macOS / Linux)
+## Agent workflow
 
-### Option A: Docker Compose (Local containerized deployment)
+| Agent | Responsibility |
+|---|---|
+| Coordinator | Interprets the task and coordinates the workflow |
+| Test Scout | Finds relevant tests and verification targets |
+| Repository Analyst | Explores the codebase and traces relevant implementation |
+| Coding Agent | Implements the requested changes |
+| Test Debug Agent | Runs tests and investigates failures |
+| Code Reviewer | Reviews the changes and verification evidence |
 
-AgentHarness Lab includes a Docker Compose setup for the Frontend and Backend:
+The exact execution path may vary by task and orchestration decisions.
 
-```bash
-# 1. Copy environment template
-cp .env.example .env
+## Architecture
 
-# 2. Configure OPENROUTER_API_KEY and OPENROUTER_MODEL in .env
-# Example: OPENROUTER_MODEL=anthropic/claude-3.5-sonnet
-
-# 3. Build and launch all services in detached mode
-docker compose up -d --build
+```text
+┌──────────────────────────────────────┐
+│          React + TypeScript          │
+│                Web UI                │
+└───────────────────┬──────────────────┘
+                    │ HTTP API
+┌───────────────────▼──────────────────┐
+│                FastAPI               │
+│               Backend                │
+├──────────────────────────────────────┤
+│ Agent orchestration                  │
+│ Repository / Git operations          │
+│ Tool execution                       │
+│ Dependency preparation               │
+│ Test execution and review            │
+│ Run records, metrics and artifacts   │
+└───────────────┬──────────────┬───────┘
+                │              │
+       ┌────────▼──────┐  ┌────▼──────────────┐
+       │  OpenRouter   │  │ Repository work  │
+       │  Chat models  │  │ Git / subprocess │
+       │  + tool calls │  │ / pytest         │
+       └───────────────┘  └───────────────────┘
 ```
 
-- **Frontend Dashboard**: <http://localhost:5173>
-- **Backend API & Docs**: <http://localhost:8000/docs>
-- **Backend Health Check**: <http://localhost:8000/health>
-- **OpenRouter Guide & Render Deployment**: See [docs/OPENROUTER_SETUP.md](file:///Users/enigma/Downloads/agentharness-lab/docs/OPENROUTER_SETUP.md).
+## Technology stack
 
-### Option B: Local Virtualenv Setup
+| Layer | Technology |
+|---|---|
+| Frontend | React, TypeScript, Vite |
+| Backend | Python, FastAPI |
+| Model access | OpenRouter |
+| Repository workflow | Git and subprocess-based tooling |
+| Verification | pytest and repository-specific test commands |
+| Evaluation | Inspect AI |
+| Containerization | Docker |
+| Backend hosting | Northflank |
+| Frontend hosting | Cloudflare Pages |
 
-From the project root:
+## Live deployment
 
-### 1. Configure the backend
+The deployed application uses two services:
+
+- **Frontend:** Cloudflare Pages
+- **Backend API:** Northflank
+
+Configure the frontend build variable `VITE_API_BASE_URL` with the public backend URL. Configure the backend CORS policy to allow the exact deployed frontend origin.
+
+The OpenRouter API key must remain in the backend's runtime environment. Never expose it through a `VITE_` variable or commit it to source control.
+
+## Run locally
+
+### Prerequisites
+
+- Git
+- Python version supported by the backend dependencies
+- Node.js and npm
+- OpenRouter API key
+- A chat-completion model that supports the tool/function-calling features used by the agents
+
+### 1. Clone the repository
 
 ```bash
-cd backend
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
+git clone <YOUR_REPOSITORY_URL>
+cd agentharness-lab
 ```
 
-Edit `backend/.env` and set `OPENROUTER_API_KEY` and `OPENROUTER_MODEL`. Do not commit `.env` or put the key in the frontend.
+### 2. Configure the backend
 
-Defaults are configured for:
+Create the backend environment file using the repository's environment template, if present. Configure:
 
-```dotenv
+```env
 LLM_PROVIDER=openrouter
 OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
-OPENROUTER_API_KEY=your_key_here
-OPENROUTER_MODEL=anthropic/claude-3.5-sonnet
-AGENTHARNESS_REPOS_ROOT=workspace/repositories
-AGENTHARNESS_RUNS_ROOT=workspace/runs
-AGENTHARNESS_DATABASE=workspace/agentharness.sqlite3
+OPENROUTER_API_KEY=your_openrouter_api_key
+OPENROUTER_MODEL=your_chat_model_id
 ```
 
-These relative paths resolve from the project root, not from the shell's current directory.
+**Important:** `OPENROUTER_MODEL` must identify a chat-capable model. An embeddings-only model cannot be used with the chat-completions endpoint. If the project has a separate embedding configuration, configure it independently.
 
-### 2. Add a real Git repository
+Never commit `.env` files, API keys, or generated credentials.
 
-Clone the target project into `workspace/repositories/` and commit the starting state you want to evaluate. Example:
-
-```bash
-cd ..
-git clone https://github.com/OWNER/REPOSITORY.git workspace/repositories/my-repository
-cd workspace/repositories/my-repository
-git status
-```
-
-The harness clones the committed repository state into `workspace/runs/<run-id>/repo` for each run. Commit any local changes you want included before starting the run. The original repository remains untouched.
-
-### 3. Start FastAPI
-
-In a terminal from the project root:
+### 3. Install backend dependencies
 
 ```bash
 cd backend
+python -m venv .venv
+```
+
+Activate the environment:
+
+```bash
+# macOS / Linux
 source .venv/bin/activate
+
+# Windows PowerShell
+.venv\Scripts\Activate.ps1
+```
+
+Install dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+Start the API. For the standard `app.main` entry point:
+
+```bash
 uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-API docs: <http://127.0.0.1:8000/docs>  
-Health check: <http://127.0.0.1:8000/api/health>
+If your checkout uses a different ASGI module, use the entry point defined by that backend version.
 
-### 4. Start React
+The API documentation is typically available at `http://127.0.0.1:8000/docs`.
 
-In another terminal from the project root:
+### 4. Install and start the frontend
+
+In a second terminal:
 
 ```bash
 cd frontend
 npm install
+```
+
+Create `frontend/.env.local`:
+
+```env
+VITE_API_BASE_URL=http://127.0.0.1:8000
+```
+
+Start Vite:
+
+```bash
 npm run dev
 ```
 
-Open <http://127.0.0.1:5173>.
+Open the local URL printed in the terminal.
 
-### 5. Run your first task
-
-1. Open **Repositories** and confirm the Git repository is listed.
-2. Open **Run evaluation**.
-3. Describe one specific bug or change, including expected behavior.
-4. Leave the test command on **Auto-detect** or choose an allowlisted runner.
-5. Start the run and inspect the real agent/tool timeline.
-6. Inspect the diff and test output before accepting any changes.
-
-## API endpoints
-
-| Method | Endpoint | Purpose |
-|---|---|---|
-| GET | `/api/health` | API/provider configuration status |
-| GET | `/api/repositories` | List Git repos under allowed root |
-| POST | `/api/repositories/register` | Register a repo path inside allowed root |
-| POST | `/api/runs` | Queue an agent run |
-| GET | `/api/runs` | List recorded runs |
-| GET | `/api/runs/{id}` | Get run details and metrics |
-| GET | `/api/runs/{id}/events` | Retrieve structured events |
-| GET | `/api/runs/{id}/stream` | Server-Sent Events stream |
-| POST | `/api/runs/{id}/cancel` | Request cancellation |
-| GET | `/api/metrics` | Aggregate metrics from SQLite |
-| GET | `/api/benchmarks/datasets` | List selectable JSONL benchmark datasets |
-| GET | `/api/benchmarks/tasks?dataset=tasks.jsonl` | Preview benchmark task definitions |
-| POST | `/api/benchmarks` | Start a repeatable benchmark suite |
-| GET | `/api/benchmarks/{id}` | Benchmark progress, per-sample results, and summary |
-| POST | `/api/benchmarks/{id}/cancel` | Cancel a running benchmark suite |
-| GET | `/api/settings` | Public runtime settings (no secrets) |
-
-## Metrics and success criteria
-
-The dashboard calculates its metrics from recorded runs. It does not prepopulate sample numbers.
-
-- **Task verification success:** a configured test command was actually executed and the latest test execution passed, and the independent code reviewer explicitly approved the diff.
-- **Success rate:** successful completed runs divided by completed runs.
-- **Wall-clock duration:** time from orchestration start to final status, including provider calls and local tool execution.
-- **Token usage / LLM calls:** usage reported by the provider API.
-- **Prompt/completion tokens:** provider-reported input and output token counts.
-- **Tool calls / handoffs / changed files:** execution events and workspace inspection.
-
-This is a useful operational signal, not a mathematical guarantee of correctness. A passing test suite can be incomplete; always inspect the diff and reviewer findings. For CV claims, report the task set size and test criteria alongside the measured result.
-
-## Overhead choices
-
-1. **Compact handoffs and context control:** agents receive relevant reports and task-specific context, not a full transcript of every agent.
-2. **Structured agent communication:** roles have explicit instructions and tools; output is recorded in a trace.
-3. **Adaptive routing:** the coordinator chooses whether the security reviewer is needed; read-only specialists run concurrently.
-4. **Inference efficiency:** one shared client/model, bounded concurrency, configurable step limits, and per-call token/latency accounting. Provider-specific caching and reasoning settings should only be enabled when documented and supported by the selected API.
-
-## Safety and limitations
-
-- Only use repositories and dependencies you trust. Test commands execute on your machine and **are not a hardened OS/container sandbox**. The disposable clone protects the original working tree, but malicious project scripts can still access host resources available to your user account.
-- Test commands are selected from an explicit allowlist. Do not add arbitrary shell execution without proper isolation.
-- Repository paths must remain under `AGENTHARNESS_REPOS_ROOT`.
-- The agent's file-writing tool is constrained to the disposable repository and rejects `.env` and `.git` paths.
-- Never expose the API key in frontend code, browser storage, screenshots, or Git.
-- The current run queue is in-process. If the API server stops, an active run will stop; use a durable job queue if you later need long-running production service.
-- Model/provider API availability, quotas, token reporting, and concurrency policies can change. Confirm your OpenRouter API key and model balance are active.
-- Automatic test discovery is intentionally conservative. Review the selected command before running unfamiliar repositories.
-
-## Development checks
-
-Backend tests:
-
-```bash
-cd backend
-source .venv/bin/activate
-python -m unittest discover -s tests -v
-```
-
-Frontend production build:
+### 5. Build the frontend
 
 ```bash
 cd frontend
-npm install
 npm run build
 ```
 
-## Repository layout
+The production build is written to `frontend/dist`.
 
-```text
-agentharness-lab/
-├── backend/
-│   ├── app/              # FastAPI, agents, LLM adapter, repository tools, runner, SQLite
-│   ├── tests/            # Unit tests for parsing and tool safety
-│   ├── requirements.txt
-│   └── .env.example
-├── frontend/
-│   └── src/              # React UI, API client, pages/components, styles
-├── docs/
-│   └── EVALUATION.md
-└── workspace/
-    └── repositories/     # Place/clone your real Git repositories here
-```
+## Docker
 
-### Benchmark suite (included and runnable)
-
-The **Benchmark suite** page runs the bundled four-task bug-fix smoke suite against a committed, intentionally buggy local fixture repository. It is designed to validate the complete evaluation pipeline end-to-end; it is not a claim about performance on arbitrary GitHub repositories. Each sample runs from the same clean committed baseline in a disposable clone, and the UI shows actual tests, reviewer gates, duration, tokens, and LLM calls.
-
-The default tasks cover parity correctness, email normalization, zero-division error handling, and stable de-duplication. They each have a focused test command. The suite runs sequentially by default to avoid provider contention and can repeat tasks up to five times. Results are stored under `workspace/benchmarks/<benchmark-id>/benchmark.json` and are based on real runs; no score is prefilled.
-
-To run the backend unit tests:
+The backend Dockerfile is located at `backend/Dockerfile`. Build using the backend directory as the build context:
 
 ```bash
-cd backend
-source .venv/bin/activate
-python -m unittest discover -s tests -v
+docker build -t agentharness-backend ./backend
 ```
 
-To validate the default manifest without calling the model:
+Run the container:
 
 ```bash
-cd backend
-source .venv/bin/activate
-python -m evaluations.run_benchmark --validate-only
+docker run --rm -p 8000:8000 \
+  -e LLM_PROVIDER=openrouter \
+  -e OPENROUTER_BASE_URL=https://openrouter.ai/api/v1 \
+  -e OPENROUTER_API_KEY=your_openrouter_api_key \
+  -e OPENROUTER_MODEL=your_chat_model_id \
+  agentharness-backend
 ```
 
-To execute it against the running API and write JSON, CSV, and Markdown reports:
+For production, inject secrets through the hosting platform's environment-variable or secret manager rather than committing them to files.
 
-```bash
-python -m evaluations.run_benchmark --repetitions 1 --output-dir workspace/benchmarks-cli
-```
+## Configuration
 
-The CLI keeps failed and timed-out samples in the denominator. It exits with status 0 only if all attempted samples succeed; a nonzero exit is a valid benchmark result, not necessarily a runner crash.
+| Variable | Purpose |
+|---|---|
+| `LLM_PROVIDER` | Selects the configured model provider |
+| `OPENROUTER_BASE_URL` | OpenRouter API base URL |
+| `OPENROUTER_API_KEY` | Backend-only OpenRouter credential |
+| `OPENROUTER_MODEL` | Chat-capable model used for agent generation |
+| `VITE_API_BASE_URL` | Backend API URL embedded into the frontend build |
 
-#### Evaluate real GitHub repositories
+The backend may support additional settings. Check the environment template and settings module in your checkout for the complete list.
 
-1. Clone and commit the target repositories under `workspace/repositories/`.
-2. Copy `docs/real_repository_tasks.example.jsonl` to `backend/evaluations/datasets/<your-name>.jsonl`.
-3. Replace the repository name and write one specific task per JSONL line. Select an allowlisted test command; use `auto` only if the repository has a recognized test runner.
-4. Open **Benchmark suite**, select your dataset, and start the run. Or pass the manifest path to the CLI with `--dataset`.
-5. Keep the task list, repository commit hashes, and test criteria with any CV metrics you report.
+### Choosing an OpenRouter model
 
-The local fixture provides deterministic pipeline coverage. For credible portfolio metrics on GitHub projects, use multiple real repositories and task prompts with a committed starting state and known regression tests.
+AgentHarness Lab uses models for multi-step agent work and tool calls. Select a model that supports:
 
-### Inspect AI evaluation adapter (included)
+- Chat completions
+- Tool/function calling
+- Sufficient context length for repository and test output
+- Reliable instruction following for code changes and review
 
-The included Inspect AI task file drives the **same AgentHarness API** using the bundled JSONL task set and scores only runs that pass the configured test command and reviewer gate. It does not run a second LLM benchmark or compare model families.
+Free model availability, rate limits, and tool support can change. Verify the selected model's current OpenRouter model page before using it.
 
-1. Keep the FastAPI backend running.
-2. Use `backend/evaluations/tasks.jsonl` for the bundled fixture suite or provide a custom JSONL dataset with real repository names already cloned under `workspace/repositories/`.
-3. In a terminal from the `backend/` directory, activate the virtual environment and run:
+## Evaluation
 
-```bash
-inspect eval evaluations/agentharness_eval.py
-```
+The project includes an evaluation integration using **Inspect AI**. Use the evaluation scripts and task definitions present in the repository for the supported evaluation workflow.
 
-To point to a different task file:
+Useful measurements for agent runs include:
 
-```bash
-inspect eval evaluations/agentharness_eval.py -T dataset_path=evaluations/datasets/my_tasks.jsonl
-```
+- Task success and verification outcome
+- Test pass/failure counts
+- Total duration and inference time
+- LLM calls and token usage
+- Tool calls and agent handoffs
+- Review verdict
+- Infrastructure failures, reported separately from agent failures
 
-Set `AGENTHARNESS_API_URL` if the API is running somewhere other than `http://127.0.0.1:8000`. Inspect writes evaluation logs that can be reviewed with `inspect view`. Each sample triggers a real AgentHarness run and may incur provider usage costs; use a small task set first.
+Do not treat one successful run as proof of general reliability. Results depend on the task, repository, model, tests, and execution environment.
+
+## Security and operational considerations
+
+This is a development and portfolio demo, **not a hardened public code-execution service**.
+
+- **Treat repository code as untrusted.** Build scripts, dependency installation, and tests can execute arbitrary code.
+- Do not allow unrestricted public repository execution without authentication, authorization, quotas, rate limits, and an appropriate isolation boundary.
+- Keep provider credentials on the backend only. Rotate any key exposed in a repository, archive, log, or screenshot.
+- Restrict production CORS to the exact frontend origin.
+- Review the filesystem, process, and network permissions available to repository subprocesses.
+- Local SQLite data, workspaces, and generated artifacts may be lost when an ephemeral container is replaced. Configure persistent storage and backups before relying on long-term run history.
+- Avoid writing private repository contents or secrets into logs and generated reports.
+
+## Known limitations
+
+- Model quality, tool-calling behavior, rate limits, and availability depend on the selected OpenRouter model.
+- Test execution is only as reliable as the repository's test suite and dependency setup.
+- Passing tests do not guarantee that a change is correct or secure.
+- Arbitrary repository execution needs stronger isolation before broad public use.
+- Persistence depends on the backend hosting and storage configuration.
+
+## Roadmap
+
+Potential next improvements:
+
+- Stronger sandboxing for repository execution
+- Authentication, per-user authorization, and usage quotas
+- Persistent run and artifact storage
+- More robust dependency caching and language-specific test runners
+- Expanded Inspect AI evaluation suites
+- Reproducible run manifests and richer trace inspection
+- Security tests for prompt injection and unsafe tool use
+
+## Contributing
+
+Contributions and issue reports are welcome.
+
+1. Fork the repository.
+2. Create a focused feature branch.
+3. Make the change and add or update tests.
+4. Run the relevant checks locally.
+5. Open a pull request describing the change, verification performed, and known limitations.
+
+Do not include API keys, private repository data, or generated credentials in commits or issue reports.
+
+## License
+
+Add the license that applies to this repository before distributing the project or accepting external contributions. Until a license is included, do not assume the code is available for unrestricted reuse.
+
+---
+
+**Built as a practical exploration of multi-agent software engineering, repository automation, and measurable agent verification.**
