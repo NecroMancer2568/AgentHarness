@@ -1,5 +1,7 @@
 services:
-  # 1. Backend: FastAPI multi-agent orchestrator
+  # ----------------------------------------------------------------------------
+  # 1. AgentHarness Backend: FastAPI Multi-Agent Orchestrator (100% Free Plan)
+  # ----------------------------------------------------------------------------
   - type: web
     name: agentharness-backend
     runtime: docker
@@ -15,16 +17,17 @@ services:
       - key: OPENROUTER_BASE_URL
         value: https://openrouter.ai/api/v1
       - key: OPENROUTER_API_KEY
-        sync: false
+        sync: false # Set in Render dashboard (Environment Variables)
       - key: OPENROUTER_MODEL
-        sync: false
+        sync: false # E.g., anthropic/claude-3.5-sonnet, openai/gpt-4o, qwen/qwen-2.5-coder-32b-instruct
       - key: OPENROUTER_TIMEOUT_SECONDS
         value: 180
       - key: OPENROUTER_MAX_RETRIES
         value: 2
+      - key: OPENROUTER_HTTP_REFERER
+        value: ""
       - key: OPENROUTER_TITLE
         value: AgentHarness Lab
-      # No disk on free plan -> paths now live on ephemeral storage
       - key: AGENTHARNESS_DATABASE
         value: /app/workspace/agentharness.sqlite3
       - key: AGENTHARNESS_REPOS_ROOT
@@ -36,7 +39,9 @@ services:
       - key: AGENTHARNESS_CORS_ORIGINS
         value: "*"
 
-  # 2. Frontend: React SPA + Nginx reverse proxy
+  # ----------------------------------------------------------------------------
+  # 2. AgentHarness Frontend: React 18 SPA + Nginx Reverse Proxy (100% Free Plan)
+  # ----------------------------------------------------------------------------
   - type: web
     name: agentharness-frontend
     runtime: docker
@@ -45,8 +50,10 @@ services:
     plan: free
     healthCheckPath: /healthz
     envVars:
+      - key: PORT
+        value: 80
       - key: BACKEND_URL
         fromService:
           type: web
           name: agentharness-backend
-          property: hostport
+          property: host 

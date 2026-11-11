@@ -146,20 +146,29 @@ docker compose ps
 
 ---
 
-## 7. Deploying on Render
+## 7. Deploying on Render (100% Free Plan — No Credit Card Needed)
 
-AgentHarness Lab includes a production-ready [`render.yaml`](file:///Users/enigma/Downloads/agentharness-lab/render.yaml) Blueprint.
+AgentHarness Lab includes a production-ready [`render.yaml`](file:///Users/enigma/Downloads/agentharness-lab/render.yaml) Blueprint pre-configured for Render's **Free Tier**:
+- Uses `plan: free` for both backend and frontend.
+- No paid persistent disk attachment (`disk:`) — eliminating credit card prompts during blueprint creation.
+- 100% free with zero upfront or recurring charges.
 
 ### Option A: Using Render Blueprints (Recommended)
 1. Push your repository to GitHub.
 2. In the [Render Dashboard](https://dashboard.render.com), click **New +** $\to$ **Blueprint**.
 3. Connect your repository. Render automatically reads `render.yaml` and sets up both:
-   - `agentharness-backend` (Docker Web Service)
-   - `agentharness-frontend` (Docker Web Service reverse-proxying API calls)
+   - `agentharness-backend` (Free Docker Web Service)
+   - `agentharness-frontend` (Free Docker Web Service with reverse proxy)
 4. Render will prompt you for secret environment variables:
    - `OPENROUTER_API_KEY`: Paste your OpenRouter API key.
    - `OPENROUTER_MODEL`: Enter your desired model (e.g. `anthropic/claude-3.5-sonnet`).
-5. Click **Apply**.
+5. Click **Apply**. Render will deploy both services without asking for card details.
+
+> [!NOTE]
+> **Free Tier Characteristics on Render**:
+> - Free web services spin down after 15 minutes of inactivity and wake up automatically upon the next incoming request (~30–50s cold start).
+> - Files stored in `/app/workspace` (SQLite and temporary test runs) reside in the container's ephemeral storage and reset when the instance sleeps or restarts.
+> - If you ever want permanent persistent disks in the future, you can upgrade the service to a paid plan ($7/mo) with a disk attached.
 
 ### Option B: Manual Web Service Setup on Render
 1. Click **New +** $\to$ **Web Service**.
