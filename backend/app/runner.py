@@ -434,7 +434,7 @@ class RunManager:
         if not row: return
         started = time.perf_counter()
         self.db.update_run(run_id, status="running", started_at=utcnow())
-        self.event(run_id, "run_started", "Execution started", {"model": self.settings.ollama_model})
+        self.event(run_id, "run_started", "Execution started", {"model": self.settings.model})
         workspace: Path | None = None
         usage_totals = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "inference_ms": 0, "tool_calls": 0}
         agent_outputs: dict[str, str] = {}

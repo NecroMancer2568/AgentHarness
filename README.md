@@ -2,9 +2,10 @@
 
 A local-first multi-agent software-engineering workbench. It runs LLM-powered agents against real Git repositories, executes allowlisted test commands in disposable clones, records tool traces and token/latency metrics, and exposes the results through a React dashboard.
 
-**Model:** DeepSeek V4 Pro through Ollama Cloud (`deepseek-v4-pro:cloud`).  
-**Backend:** Python, FastAPI, OpenAI-compatible Ollama Cloud client, SQLite.  
-**Frontend:** React, TypeScript, Vite, Recharts.  
+**Inference Provider:** [OpenRouter API](https://openrouter.ai) (`https://openrouter.ai/api/v1`).  
+**Models Supported:** Any OpenAI-compatible tool-calling model on OpenRouter (e.g. `anthropic/claude-3.5-sonnet`, `openai/gpt-4o`, `qwen/qwen-2.5-coder-32b-instruct`, `deepseek/deepseek-chat`).  
+**Backend:** Python 3.11+, FastAPI, OpenAI Python SDK, SQLite.  
+**Frontend:** React 18, TypeScript, Vite, Recharts.  
 **Validation:** backend unit tests, real test-runner execution, recorded run-verification rules, and an included Inspect AI task adapter for repeatable task sets.
 
 This is a practical engineering project, not a claim of novel research. The metrics are operational measurements from actual executions, not benchmark results baked into the UI.
@@ -25,30 +26,30 @@ This is a practical engineering project, not a claim of novel research. The metr
 - Python 3.11+ recommended.
 - Node.js 20+ and npm.
 - Git.
-- An Ollama Cloud account and API key. The model identifier and endpoint are configurable.
+- An [OpenRouter](https://openrouter.ai) account and API key.
 - Required test runtimes for the repositories you intend to evaluate (for example, Python/pytest, Node/npm, Go, Rust, Maven, or Gradle).
 
 ## Quick start (macOS / Linux)
 
-### Option A: Docker Compose (Recommended for reproducible local deployment)
+### Option A: Docker Compose (Local containerized deployment)
 
-AgentHarness Lab includes a complete multi-container Docker Compose setup for the Frontend, Backend, and Ollama:
+AgentHarness Lab includes a Docker Compose setup for the Frontend and Backend:
 
 ```bash
 # 1. Copy environment template
 cp .env.example .env
 
-# 2. Build and launch all services in detached mode
-docker compose up -d --build
+# 2. Configure OPENROUTER_API_KEY and OPENROUTER_MODEL in .env
+# Example: OPENROUTER_MODEL=anthropic/claude-3.5-sonnet
 
-# 3. (Optional) Provision the local or cloud LLM model
-./scripts/init-ollama.sh
+# 3. Build and launch all services in detached mode
+docker compose up -d --build
 ```
 
 - **Frontend Dashboard**: <http://localhost:5173>
 - **Backend API & Docs**: <http://localhost:8000/docs>
 - **Backend Health Check**: <http://localhost:8000/health>
-- **Detailed Guide & Cloud Run Deployment**: See [docs/DOCKER_DEPLOYMENT.md](file:///Users/enigma/Downloads/agentharness-lab/docs/DOCKER_DEPLOYMENT.md).
+- **OpenRouter Guide & Render Deployment**: See [docs/OPENROUTER_SETUP.md](file:///Users/enigma/Downloads/agentharness-lab/docs/OPENROUTER_SETUP.md).
 
 ### Option B: Local Virtualenv Setup
 
@@ -64,13 +65,15 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Edit `backend/.env` and set `OLLAMA_API_KEY` to your Ollama Cloud API key. Do not commit `.env` or put the key in the frontend.
+Edit `backend/.env` and set `OPENROUTER_API_KEY` and `OPENROUTER_MODEL`. Do not commit `.env` or put the key in the frontend.
 
 Defaults are configured for:
 
 ```dotenv
-OLLAMA_BASE_URL=https://ollama.com/v1
-OLLAMA_MODEL=deepseek-v4-pro:cloud
+LLM_PROVIDER=openrouter
+OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+OPENROUTER_API_KEY=your_key_here
+OPENROUTER_MODEL=anthropic/claude-3.5-sonnet
 AGENTHARNESS_REPOS_ROOT=workspace/repositories
 AGENTHARNESS_RUNS_ROOT=workspace/runs
 AGENTHARNESS_DATABASE=workspace/agentharness.sqlite3
@@ -174,7 +177,7 @@ This is a useful operational signal, not a mathematical guarantee of correctness
 - The agent's file-writing tool is constrained to the disposable repository and rejects `.env` and `.git` paths.
 - Never expose the API key in frontend code, browser storage, screenshots, or Git.
 - The current run queue is in-process. If the API server stops, an active run will stop; use a durable job queue if you later need long-running production service.
-- Model/provider API availability, quotas, token reporting, and concurrency policies can change. Confirm the Ollama Cloud model is enabled for your account.
+- Model/provider API availability, quotas, token reporting, and concurrency policies can change. Confirm your OpenRouter API key and model balance are active.
 - Automatic test discovery is intentionally conservative. Review the selected command before running unfamiliar repositories.
 
 ## Development checks

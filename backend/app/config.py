@@ -24,10 +24,14 @@ PROJECT_ROOT = _find_project_root()
 
 class Settings(BaseSettings):
     port: int = 8000
-    ollama_api_key: str = ""
-    ollama_base_url: str = "https://ollama.com/v1"
-    ollama_model: str = "deepseek-v4-pro:cloud"
-    ollama_timeout_seconds: int = 180
+    llm_provider: str = "openrouter"
+    openrouter_api_key: str = ""
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    openrouter_model: str = ""
+    openrouter_timeout_seconds: int = 180
+    openrouter_max_retries: int = 2
+    openrouter_http_referer: str = ""
+    openrouter_title: str = "AgentHarness Lab"
     agentharness_repos_root: str = "workspace/repositories"
     agentharness_runs_root: str = "workspace/runs"
     agentharness_database: str = "workspace/agentharness.sqlite3"
@@ -41,25 +45,21 @@ class Settings(BaseSettings):
     agentharness_venv_cache_root: str = "workspace/venvs"
     model_config = SettingsConfigDict(env_file=("backend/.env", ".env"), env_file_encoding="utf-8", extra="ignore")
 
-    @field_validator("ollama_base_url")
+    @field_validator("openrouter_base_url")
     @classmethod
-    def _normalize_ollama_base_url(cls, value: str) -> str:
+    def _normalize_openrouter_base_url(cls, value: str) -> str:
         clean = value.strip().rstrip("/")
         if not clean.endswith("/v1"):
             clean = f"{clean}/v1"
         return clean
 
     @property
-    def is_local_ollama(self) -> bool:
-        url = self.ollama_base_url.lower()
-        return (
-            "localhost" in url
-            or "127.0.0.1" in url
-            or "ollama:" in url
-            or "host.docker.internal" in url
-            or url.startswith("http://ollama")
-            or (url.startswith("http://") and "ollama.com" not in url)
-        )
+    def model(self) -> str:
+        return self.openrouter_model.strip()
+
+    @property
+    def is_provider_configured(self) -> bool:
+        return bool(self.openrouter_api_key.strip() and self.openrouter_model.strip())
 
     def resolve_path(self, value: str) -> Path:
         path = Path(value).expanduser()

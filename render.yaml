@@ -1,0 +1,64 @@
+services:
+  # ----------------------------------------------------------------------------
+  # 1. AgentHarness Backend: FastAPI Multi-Agent Orchestrator
+  # ----------------------------------------------------------------------------
+  - type: web
+    name: agentharness-backend
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    plan: standard
+    healthCheckPath: /health
+    disk:
+      name: agentharness-workspace
+      mountPath: /app/workspace
+      sizeGB: 10
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: LLM_PROVIDER
+        value: openrouter
+      - key: OPENROUTER_BASE_URL
+        value: https://openrouter.ai/api/v1
+      - key: OPENROUTER_API_KEY
+        sync: false # Must be entered in Render dashboard secret manager
+      - key: OPENROUTER_MODEL
+        sync: false # E.g., anthropic/claude-3.5-sonnet, openai/gpt-4o, qwen/qwen-2.5-coder-32b-instruct
+      - key: OPENROUTER_TIMEOUT_SECONDS
+        value: 180
+      - key: OPENROUTER_MAX_RETRIES
+        value: 2
+      - key: OPENROUTER_HTTP_REFERER
+        value: ""
+      - key: OPENROUTER_TITLE
+        value: AgentHarness Lab
+      - key: AGENTHARNESS_DATABASE
+        value: /app/workspace/agentharness.sqlite3
+      - key: AGENTHARNESS_REPOS_ROOT
+        value: /app/workspace/repositories
+      - key: AGENTHARNESS_RUNS_ROOT
+        value: /app/workspace/runs
+      - key: AGENTHARNESS_VENV_CACHE_ROOT
+        value: /app/workspace/venvs
+      - key: AGENTHARNESS_CORS_ORIGINS
+        value: "*"
+
+  # ----------------------------------------------------------------------------
+  # 2. AgentHarness Frontend: React 18 SPA + Nginx Reverse Proxy
+  # ----------------------------------------------------------------------------
+  - type: web
+    name: agentharness-frontend
+    runtime: docker
+    dockerfilePath: ./frontend/Dockerfile
+    dockerContext: ./frontend
+    plan: starter
+    healthCheckPath: /healthz
+    envVars:
+      - key: PORT
+        value: 80
+      - key: BACKEND_URL
+        fromService:
+          type: web
+          name: agentharness-backend
+          property: host
+

@@ -113,7 +113,7 @@ class BenchmarkManager:
         directory.mkdir(parents=True, exist_ok=False)
         record: dict[str, Any] = {
             "id": benchmark_id, "status": "queued", "created_at": utcnow(), "updated_at": utcnow(),
-            "model": self.settings.ollama_model, "dataset": str(selected_dataset), "dataset_name": dataset_name,
+            "model": self.settings.model, "dataset": str(selected_dataset), "dataset_name": dataset_name,
             "task_count": len(task_defs), "repetitions": repetitions,
             "planned_samples": len(task_defs) * repetitions, "completed_samples": 0,
             "results": [], "summary": None, "error": None,

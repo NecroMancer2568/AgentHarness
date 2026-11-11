@@ -38,13 +38,11 @@ async def root_health():
 
 @app.get("/api/health", response_model=HealthOut)
 async def health():
-    configured = bool(settings.ollama_api_key) or settings.is_local_ollama
-    return {"status":"ok", "model":settings.ollama_model, "provider_configured":configured, "repository_root":str(settings.repos_root)}
+    return {"status":"ok", "model":settings.model, "provider_configured":settings.is_provider_configured, "repository_root":str(settings.repos_root)}
 
 @app.get("/api/models")
 async def models():
-    provider_name = "Local Ollama" if settings.is_local_ollama else "Ollama Cloud"
-    return {"provider":provider_name, "base_url":settings.ollama_base_url, "model":settings.ollama_model,
+    return {"provider":settings.llm_provider, "base_url":settings.openrouter_base_url, "model":settings.model,
             "context_note":"Model context and output limits are provider-side. Keep prompts focused; large context windows do not make every prompt free."}
 
 @app.get("/api/repositories")
@@ -196,13 +194,12 @@ async def cancel_benchmark(benchmark_id: str):
 
 @app.get("/api/settings")
 async def get_public_settings():
-    configured = bool(settings.ollama_api_key) or settings.is_local_ollama
-    return {"model":settings.ollama_model, "base_url":settings.ollama_base_url,
+    return {"model":settings.model, "base_url":settings.openrouter_base_url, "provider":settings.llm_provider,
       "repos_root":str(settings.repos_root), "runs_root":str(settings.runs_root),
       "max_agent_steps":settings.agentharness_max_agent_steps,
       "max_parallel_readers":settings.agentharness_max_parallel_readers,
       "test_timeout_seconds":settings.agentharness_test_timeout_seconds,
-      "api_key_configured":configured}
+      "api_key_configured":bool(settings.openrouter_api_key.strip())}
 
 def _serialize_run(row: dict, detail: bool = False):
     item = {"id":row["id"], "repository":row["repository"], "task":row["task"], "status":row["status"],
