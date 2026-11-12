@@ -368,6 +368,21 @@ async def run_process_safely(
     is_posix = sys.platform != "win32"
     timed_out = False
     proc = None
+    so_buf: list[bytes] = []
+    se_buf: list[bytes] = []
+
+    async def _read_stream(stream: asyncio.StreamReader | None, buf: list[bytes]):
+        if not stream:
+            return
+        while True:
+            try:
+                chunk = await stream.read(4096)
+                if not chunk:
+                    break
+                buf.append(chunk)
+            except (asyncio.CancelledError, Exception):
+                break
+
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -377,42 +392,54 @@ async def run_process_safely(
             env=env,
             start_new_session=is_posix,
         )
-        so_b, se_b = await asyncio.wait_for(proc.communicate(), timeout=max(0.5, timeout))
-        stdout = so_b.decode(errors="replace")
-        stderr = se_b.decode(errors="replace")
-        return proc.returncode or 0, stdout, stderr, False
-    except asyncio.TimeoutError:
-        timed_out = True
-        if proc:
-            try:
-                if is_posix and hasattr(proc, "pid") and proc.pid:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-                else:
-                    proc.terminate()
-            except (ProcessLookupError, PermissionError, OSError):
-                pass
 
-            try:
-                so_b, se_b = await asyncio.wait_for(proc.communicate(), timeout=3.0)
-            except (asyncio.TimeoutError, Exception):
+        t_out = asyncio.create_task(_read_stream(proc.stdout, so_buf))
+        t_err = asyncio.create_task(_read_stream(proc.stderr, se_buf))
+
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=max(0.5, timeout))
+        except asyncio.TimeoutError:
+            timed_out = True
+            if proc:
                 try:
                     if is_posix and hasattr(proc, "pid") and proc.pid:
-                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
                     else:
-                        proc.kill()
+                        proc.terminate()
                 except (ProcessLookupError, PermissionError, OSError):
                     pass
-                try:
-                    so_b, se_b = await proc.communicate()
-                except Exception:
-                    so_b, se_b = b"", b""
 
-            stdout = so_b.decode(errors="replace") if so_b else ""
-            stderr = se_b.decode(errors="replace") if se_b else ""
-            return -1, stdout, stderr, True
-        return -1, "", "Process timed out and could not be initialized.", True
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=3.0)
+                except (asyncio.TimeoutError, Exception):
+                    try:
+                        if is_posix and hasattr(proc, "pid") and proc.pid:
+                            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                        else:
+                            proc.kill()
+                    except (ProcessLookupError, PermissionError, OSError):
+                        pass
+                    try:
+                        await asyncio.wait_for(proc.wait(), timeout=1.0)
+                    except Exception:
+                        pass
+
+        # Drain output streams with bounded timeout
+        try:
+            await asyncio.wait_for(asyncio.gather(t_out, t_err, return_exceptions=True), timeout=1.0)
+        except asyncio.TimeoutError:
+            t_out.cancel()
+            t_err.cancel()
+
+        stdout = b"".join(so_buf).decode(errors="replace")
+        stderr = b"".join(se_buf).decode(errors="replace")
+        rc = -1 if timed_out else (proc.returncode if proc and proc.returncode is not None else 0)
+        return rc, stdout, stderr, timed_out
+
     except Exception as exc:
-        return -1, "", f"Failed to execute command: {exc}", False
+        stdout = b"".join(so_buf).decode(errors="replace")
+        stderr = b"".join(se_buf).decode(errors="replace")
+        return -1, stdout, f"Failed to execute command: {exc}\n{stderr}", False
 
 
 def inspect_repository_dependencies(workspace: Path) -> dict[str, Any]:
@@ -597,7 +624,11 @@ async def prepare_environment(
     manifest_hash = dep_info["combined_hash"] or "no-manifest"
     started = time.perf_counter()
 
-    timeout_budget = float(settings.agentharness_dependency_timeout_seconds)
+    has_heavyweight_ml = any(p in declared_packages for p in ("torch", "tensorflow", "transformers", "scipy", "triton"))
+    base_timeout = float(settings.agentharness_dependency_timeout_seconds)
+    # Heavyweight ML stacks (e.g. PyTorch + Transformers) require downloading >1.5GB of wheels.
+    # Automatically grant at least 600s if the configured timeout is lower, preventing premature aborts on initial downloads.
+    timeout_budget = max(base_timeout, 600.0 if has_heavyweight_ml and base_timeout < 600.0 else base_timeout)
     deadline = started + timeout_budget
 
     def remaining_time() -> float:
@@ -813,7 +844,10 @@ async def prepare_environment(
                 has_gpu = (r_gpu.returncode == 0)
         except Exception:
             has_gpu = False
-        if not has_gpu:
+        # IMPORTANT: download.pytorch.org/whl/cpu ONLY hosts x86_64 and win_amd64 wheels!
+        # On aarch64 / arm64, PyTorch publishes official pre-built wheels directly on PyPI.
+        # Adding download.pytorch.org/whl/cpu on aarch64 causes pip to stall and query empty indexes.
+        if not has_gpu and arch in {"x86_64", "amd64"}:
             base_pip_cmd.extend(["--extra-index-url", "https://download.pytorch.org/whl/cpu"])
 
     # Prepare installation command arguments

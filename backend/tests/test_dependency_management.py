@@ -411,19 +411,27 @@ class DependencyManagementTests(unittest.TestCase):
                 return 0, "", "", False
             return 0, "Successfully installed", "", False
 
-        with patch("app.dependencies.run_process_safely", side_effect=capture_proc):
-            res = asyncio.run(prepare_environment(workspace, self.settings, "ml_repo"))
+        # On x86_64 CPU: adds download.pytorch.org/whl/cpu
+        with patch("app.dependencies.run_process_safely", side_effect=capture_proc), \
+             patch("platform.machine", return_value="x86_64"):
+            res = asyncio.run(prepare_environment(workspace, self.settings, "ml_repo_x86"))
             self.assertEqual(res["status"], "DEPENDENCIES_READY")
 
             pip_call = next(c for c in captured_cmds if "install" in c)
-            # Verify --cache-dir was provided
             self.assertIn("--cache-dir", pip_call)
-            # Verify --prefer-binary was provided
             self.assertIn("--prefer-binary", pip_call)
-            # Verify CPU torch index was added on CPU environments
             self.assertIn("https://download.pytorch.org/whl/cpu", pip_call)
-            # Verify none of the dependencies were removed
             self.assertIn("-r", pip_call)
+
+        # On aarch64: whl/cpu must NOT be added (aarch64 wheels are on PyPI)
+        captured_cmds.clear()
+        with patch("app.dependencies.run_process_safely", side_effect=capture_proc), \
+             patch("platform.machine", return_value="aarch64"):
+            res_arm = asyncio.run(prepare_environment(workspace, self.settings, "ml_repo_arm"))
+            self.assertEqual(res_arm["status"], "DEPENDENCIES_READY")
+
+            pip_call_arm = next(c for c in captured_cmds if "install" in c)
+            self.assertNotIn("https://download.pytorch.org/whl/cpu", pip_call_arm)
 
 
 if __name__ == "__main__":
