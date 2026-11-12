@@ -43,6 +43,9 @@ class Settings(BaseSettings):
     agentharness_cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173,http://localhost:8080,http://127.0.0.1:8080,http://localhost,http://127.0.0.1"
     agentharness_dependency_timeout_seconds: int = 300
     agentharness_venv_cache_root: str = "workspace/venvs"
+    agentharness_pip_cache_dir: str = "workspace/pip_cache"
+    agentharness_pip_extra_index_url: str = ""
+    agentharness_pip_index_url: str = ""
     model_config = SettingsConfigDict(env_file=("backend/.env", ".env"), env_file_encoding="utf-8", extra="ignore")
 
     @field_validator("openrouter_base_url")
@@ -78,6 +81,10 @@ class Settings(BaseSettings):
     @property
     def venvs_root(self) -> Path:
         return self.resolve_path(self.agentharness_venv_cache_root)
+
+    @property
+    def pip_cache_path(self) -> Path:
+        return self.resolve_path(self.agentharness_pip_cache_dir)
 
     @property
     def database_path(self) -> Path:

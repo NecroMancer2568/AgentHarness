@@ -670,6 +670,7 @@ class ToolRuntime:
         venv_path: Path | None = None,
         declared_packages: list[str] | None = None,
         event_callback=None,
+        dependency_status: str = "DEPENDENCIES_READY",
     ):
         self.workspace = workspace.resolve()
         self.settings = settings
@@ -677,6 +678,7 @@ class ToolRuntime:
         self.venv_path = venv_path.resolve() if venv_path else None
         self.declared_packages = declared_packages or []
         self.event_callback = event_callback
+        self.dependency_status = dependency_status
         self.tool_count = 0
         self.test_results: list[dict[str, Any]] = []
 
@@ -915,6 +917,25 @@ class ToolRuntime:
 
     async def run_test_command(self, command: list[str], timeout: int) -> dict[str, Any]:
         """Execute test command, capturing stdout/stderr separately with metrics and outcome analysis."""
+        if getattr(self, "dependency_status", "DEPENDENCIES_READY") in {"DEPENDENCY_INSTALL_BLOCKED", "DEPENDENCY_INSTALL_FAILED"}:
+            err = f"Test execution prevented: dependency installation was not completed ({self.dependency_status})."
+            self._emit("test_completed", err, {"outcome": "BLOCKED", "passed": False})
+            res = {
+                "command": command,
+                "exit_code": -1,
+                "stdout": "",
+                "stderr": err,
+                "duration_ms": 0,
+                "timed_out": False,
+                "metrics": {"collected": 0, "passed": 0, "failed": 0, "skipped": 0, "errors": 0},
+                "outcome": "BLOCKED",
+                "failure_details": [],
+                "error_message": err,
+                "passed": False,
+            }
+            self.test_results.append(res)
+            return res
+
         self._emit("tool_started", "Running command: " + " ".join(command), {"command": command})
         started = time.perf_counter()
         try:

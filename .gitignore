@@ -9,6 +9,7 @@ node_modules/
 frontend/dist/
 workspace/runs/
 workspace/venvs/
+workspace/pip_cache/
 workspace/benchmarks/
 workspace/benchmarks-cli/
 workspace/repositories/*

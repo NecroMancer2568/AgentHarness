@@ -5,9 +5,11 @@ import asyncio
 import hashlib
 import json
 import os
+import platform
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -15,6 +17,13 @@ from pathlib import Path
 from typing import Any
 
 from .config import Settings
+
+try:
+    from packaging.specifiers import SpecifierSet
+    from packaging.version import Version
+except ImportError:
+    SpecifierSet = None
+    Version = None
 
 # Standard mapping of Python import module names to PyPI distribution package names
 IMPORT_TO_DISTRIBUTION = {
@@ -29,6 +38,8 @@ IMPORT_TO_DISTRIBUTION = {
     "multipart": "python-multipart",
     "serial": "pyserial",
     "magic": "python-magic",
+    "torch": "torch",
+    "transformers": "transformers",
 }
 
 DEPENDENCY_STATES = {
@@ -45,7 +56,6 @@ def sanitize_credentials(text: str) -> str:
     """Mask credentials in package manager logs and URLs."""
     if not text:
         return ""
-    # Mask http(s)://user:password@host -> http(s)://***:***@host
     sanitized = re.sub(r'(https?://)[^:\s/]+:[^@\s/]+@', r'\1***:***@', text)
     sanitized = re.sub(r'([a-zA-Z0-9_\-\+\.]+://)[^:\s/]+:[^@\s/]+@', r'\1***:***@', sanitized)
     return sanitized
@@ -59,7 +69,7 @@ def normalize_package_name(name: str) -> str:
 
 def parse_requirements_txt(content: str) -> list[str]:
     """Extract package names from a requirements.txt file."""
-    packages = []
+    packages: list[str] = []
     for line in content.splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
@@ -71,7 +81,7 @@ def parse_requirements_txt(content: str) -> list[str]:
         match = re.match(r"^([a-zA-Z0-9_\-\.]+)", line)
         if match:
             packages.append(normalize_package_name(match.group(1)))
-    return packages
+    return sorted(list(dict.fromkeys(packages)))
 
 
 def parse_pyproject_toml(content: str) -> list[str]:
@@ -110,12 +120,299 @@ def parse_pyproject_toml(content: str) -> list[str]:
 
 def parse_setup_py(content: str) -> list[str]:
     """Extract packages listed in install_requires in setup.py."""
-    packages = []
+    packages: list[str] = []
     matches = re.findall(r'["\']([a-zA-Z0-9_\-\.]+)(?:[><=~!\s][^"\']*)?["\']', content)
     for m in matches:
         if m.lower() not in {"setup.py", "utf-8", "text/markdown", "setuptools"}:
             packages.append(normalize_package_name(m))
-    return packages
+    return sorted(list(dict.fromkeys(packages)))
+
+
+def parse_poetry_lock(content: str) -> list[str]:
+    """Extract package names from a poetry.lock file."""
+    packages: list[str] = []
+    try:
+        import tomllib
+        data = tomllib.loads(content)
+        for pkg in data.get("package", []):
+            name = pkg.get("name")
+            if name and name.lower() != "python":
+                packages.append(normalize_package_name(name))
+        if packages:
+            return sorted(list(dict.fromkeys(packages)))
+    except Exception:
+        pass
+
+    matches = re.findall(r'name\s*=\s*["\']([a-zA-Z0-9_\-\.]+)["\']', content)
+    for m in matches:
+        if m.lower() != "python":
+            packages.append(normalize_package_name(m))
+    return sorted(list(dict.fromkeys(packages)))
+
+
+def parse_uv_lock(content: str) -> list[str]:
+    """Extract package names from a uv.lock file."""
+    packages: list[str] = []
+    try:
+        import tomllib
+        data = tomllib.loads(content)
+        for pkg in data.get("package", []):
+            name = pkg.get("name")
+            if name and name.lower() != "python":
+                packages.append(normalize_package_name(name))
+        if packages:
+            return sorted(list(dict.fromkeys(packages)))
+    except Exception:
+        pass
+
+    matches = re.findall(r'name\s*=\s*["\']([a-zA-Z0-9_\-\.]+)["\']', content)
+    for m in matches:
+        if m.lower() != "python":
+            packages.append(normalize_package_name(m))
+    return sorted(list(dict.fromkeys(packages)))
+
+
+def detect_python_version_requirement(workspace: Path) -> dict[str, Any] | None:
+    """Detect required Python version specification from repository metadata."""
+    # 1. .python-version
+    pv_file = workspace / ".python-version"
+    if pv_file.is_file():
+        text = pv_file.read_text(encoding="utf-8", errors="replace").strip()
+        if text:
+            return {"source": ".python-version", "specifier": text}
+
+    # 2. runtime.txt
+    rt_file = workspace / "runtime.txt"
+    if rt_file.is_file():
+        text = rt_file.read_text(encoding="utf-8", errors="replace").strip()
+        m = re.search(r"python-?(\d+\.\d+(?:\.\d+)?)", text, re.IGNORECASE)
+        spec = m.group(1) if m else text
+        if spec:
+            return {"source": "runtime.txt", "specifier": spec}
+
+    # 3. pyproject.toml
+    pyproject = workspace / "pyproject.toml"
+    if pyproject.is_file():
+        try:
+            import tomllib
+            data = tomllib.loads(pyproject.read_text(encoding="utf-8", errors="replace"))
+            rp = (data.get("project") or {}).get("requires-python")
+            if rp:
+                return {"source": "pyproject.toml (project.requires-python)", "specifier": str(rp).strip()}
+            pp = ((data.get("tool") or {}).get("poetry") or {}).get("dependencies", {}).get("python")
+            if pp:
+                return {"source": "pyproject.toml (poetry.dependencies.python)", "specifier": str(pp).strip()}
+        except Exception:
+            pass
+
+    # 4. Pipfile
+    pipfile = workspace / "Pipfile"
+    if pipfile.is_file():
+        try:
+            import tomllib
+            data = tomllib.loads(pipfile.read_text(encoding="utf-8", errors="replace"))
+            req = data.get("requires") or {}
+            pv = req.get("python_version") or req.get("python_full_version")
+            if pv:
+                return {"source": "Pipfile", "specifier": str(pv).strip()}
+        except Exception:
+            pass
+
+    return None
+
+
+def check_python_version_satisfies(version_str: str, spec_str: str) -> bool:
+    """Check if a Python version string satisfies a version specifier."""
+    if not spec_str:
+        return True
+    clean_spec = spec_str.strip()
+
+    # Convert poetry caret syntax (^3.10 -> >=3.10.0,<4.0.0)
+    if clean_spec.startswith("^"):
+        base = clean_spec[1:].strip()
+        nums = [int(p) for p in re.findall(r"\d+", base)]
+        major = nums[0] if nums else 3
+        clean_spec = f">={base},<{major+1}.0.0"
+    # Convert poetry tilde syntax (~3.10 -> >=3.10.0,<3.11.0)
+    elif clean_spec.startswith("~"):
+        base = clean_spec[1:].strip()
+        nums = [int(p) for p in re.findall(r"\d+", base)]
+        major = nums[0] if nums else 3
+        minor = nums[1] if len(nums) > 1 else 0
+        clean_spec = f">={base},<{major}.{minor+1}.0"
+    # Bare versions like "3.11"
+    elif re.match(r"^\d+\.\d+$", clean_spec):
+        clean_spec = f"=={clean_spec}.*"
+
+    clean_ver = version_str.split("+")[0].strip()
+
+    if SpecifierSet and Version:
+        try:
+            spec = SpecifierSet(clean_spec)
+            v = Version(clean_ver)
+            return spec.contains(v, prereleases=True)
+        except Exception:
+            pass
+
+    # Fallback comparison
+    m = re.search(r"(\d+)\.(\d+)", clean_spec)
+    vm = re.search(r"(\d+)\.(\d+)", clean_ver)
+    if m and vm:
+        t_maj, t_min = int(m.group(1)), int(m.group(2))
+        v_maj, v_min = int(vm.group(1)), int(vm.group(2))
+        if "<" in clean_spec and ">=" not in clean_spec:
+            return (v_maj, v_min) < (t_maj, t_min)
+        if ">=" in clean_spec:
+            return (v_maj, v_min) >= (t_maj, t_min)
+        return (v_maj, v_min) == (t_maj, t_min)
+    return True
+
+
+def resolve_compatible_python(
+    workspace: Path,
+    current_executable: str = sys.executable,
+) -> tuple[str, str, dict[str, Any]]:
+    """
+    Select an appropriate Python interpreter based on repository metadata and system availability.
+    Returns: (executable_path, version_string, details)
+    """
+    curr_ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    req_info = detect_python_version_requirement(workspace)
+
+    details: dict[str, Any] = {
+        "required_specifier": req_info["specifier"] if req_info else None,
+        "source": req_info["source"] if req_info else None,
+        "selected_executable": current_executable,
+        "version": curr_ver,
+        "switched": False,
+        "warning": None,
+    }
+
+    if not req_info or not req_info["specifier"]:
+        return current_executable, curr_ver, details
+
+    spec = req_info["specifier"]
+    if check_python_version_satisfies(curr_ver, spec):
+        return current_executable, curr_ver, details
+
+    # Current interpreter does not satisfy requirement; search candidate binaries
+    candidates = [
+        "python3.12",
+        "python3.11",
+        "python3.10",
+        "python3.13",
+        "python3.9",
+        "python3",
+        "python",
+    ]
+
+    # Include explicit common directories if available
+    extra_dirs = [
+        Path("/usr/local/bin"),
+        Path("/usr/bin"),
+        Path("/opt/homebrew/bin"),
+        Path.home() / ".local/bin",
+        Path.home() / ".pyenv/shims",
+    ]
+
+    candidate_paths: list[str] = []
+    for c in candidates:
+        w = shutil.which(c)
+        if w and w not in candidate_paths:
+            candidate_paths.append(w)
+        for ed in extra_dirs:
+            p = ed / c
+            if p.is_file() and os.access(p, os.X_OK) and str(p) not in candidate_paths:
+                candidate_paths.append(str(p))
+
+    for cand in candidate_paths:
+        try:
+            res = subprocess.run(
+                [cand, "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')"],
+                capture_output=True,
+                text=True,
+                timeout=4,
+            )
+            if res.returncode == 0:
+                cand_ver = res.stdout.strip()
+                if cand_ver and check_python_version_satisfies(cand_ver, spec):
+                    details.update({
+                        "selected_executable": cand,
+                        "version": cand_ver,
+                        "switched": True,
+                        "warning": f"Selected compatible interpreter {cand} ({cand_ver}) satisfying {spec} from {req_info['source']}.",
+                    })
+                    return cand, cand_ver, details
+        except Exception:
+            continue
+
+    # No compatible alternate found; fallback to current with informative diagnostic
+    details["warning"] = (
+        f"Repository specifies Python requirement '{spec}' (from {req_info['source']}), "
+        f"but current interpreter is {curr_ver} and no compatible alternate was found in PATH. "
+        "Proceeding with current interpreter."
+    )
+    return current_executable, curr_ver, details
+
+
+async def run_process_safely(
+    cmd: list[str],
+    cwd: Path,
+    timeout: float,
+    env: dict[str, str] | None = None,
+) -> tuple[int, str, str, bool]:
+    """
+    Run an async subprocess with process group isolation, graceful termination, and output capture.
+    Returns: (returncode, stdout, stderr, timed_out)
+    """
+    is_posix = sys.platform != "win32"
+    timed_out = False
+    proc = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            cwd=str(cwd),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+            start_new_session=is_posix,
+        )
+        so_b, se_b = await asyncio.wait_for(proc.communicate(), timeout=max(0.5, timeout))
+        stdout = so_b.decode(errors="replace")
+        stderr = se_b.decode(errors="replace")
+        return proc.returncode or 0, stdout, stderr, False
+    except asyncio.TimeoutError:
+        timed_out = True
+        if proc:
+            try:
+                if is_posix and hasattr(proc, "pid") and proc.pid:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                else:
+                    proc.terminate()
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+
+            try:
+                so_b, se_b = await asyncio.wait_for(proc.communicate(), timeout=3.0)
+            except (asyncio.TimeoutError, Exception):
+                try:
+                    if is_posix and hasattr(proc, "pid") and proc.pid:
+                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    else:
+                        proc.kill()
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass
+                try:
+                    so_b, se_b = await proc.communicate()
+                except Exception:
+                    so_b, se_b = b"", b""
+
+            stdout = so_b.decode(errors="replace") if so_b else ""
+            stderr = se_b.decode(errors="replace") if se_b else ""
+            return -1, stdout, stderr, True
+        return -1, "", "Process timed out and could not be initialized.", True
+    except Exception as exc:
+        return -1, "", f"Failed to execute command: {exc}", False
 
 
 def inspect_repository_dependencies(workspace: Path) -> dict[str, Any]:
@@ -124,7 +421,7 @@ def inspect_repository_dependencies(workspace: Path) -> dict[str, Any]:
     declared_packages: set[str] = set()
     language = "unknown"
 
-    # 1. Python manifests
+    # 1. Python manifests: requirements*.txt
     req_files = list(workspace.glob("requirements*.txt")) + list(workspace.glob("requirements/*.txt"))
     for rf in sorted(req_files):
         if rf.is_file():
@@ -135,6 +432,7 @@ def inspect_repository_dependencies(workspace: Path) -> dict[str, Any]:
             manifests.append({"type": "requirements.txt", "path": str(rf.relative_to(workspace)), "hash": h, "packages": pkgs})
             language = "python"
 
+    # 2. pyproject.toml
     pyproject = workspace / "pyproject.toml"
     if pyproject.is_file():
         text = pyproject.read_text(encoding="utf-8", errors="replace")
@@ -144,6 +442,27 @@ def inspect_repository_dependencies(workspace: Path) -> dict[str, Any]:
         manifests.append({"type": "pyproject.toml", "path": "pyproject.toml", "hash": h, "packages": pkgs})
         language = "python"
 
+    # 3. poetry.lock
+    poetry_lock = workspace / "poetry.lock"
+    if poetry_lock.is_file():
+        text = poetry_lock.read_text(encoding="utf-8", errors="replace")
+        pkgs = parse_poetry_lock(text)
+        declared_packages.update(pkgs)
+        h = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        manifests.append({"type": "poetry.lock", "path": "poetry.lock", "hash": h, "packages": pkgs})
+        language = "python"
+
+    # 4. uv.lock
+    uv_lock = workspace / "uv.lock"
+    if uv_lock.is_file():
+        text = uv_lock.read_text(encoding="utf-8", errors="replace")
+        pkgs = parse_uv_lock(text)
+        declared_packages.update(pkgs)
+        h = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        manifests.append({"type": "uv.lock", "path": "uv.lock", "hash": h, "packages": pkgs})
+        language = "python"
+
+    # 5. setup.py
     setup_py = workspace / "setup.py"
     if setup_py.is_file():
         text = setup_py.read_text(encoding="utf-8", errors="replace")
@@ -153,6 +472,7 @@ def inspect_repository_dependencies(workspace: Path) -> dict[str, Any]:
         manifests.append({"type": "setup.py", "path": "setup.py", "hash": h, "packages": pkgs})
         language = "python"
 
+    # 6. Pipfile
     pipfile = workspace / "Pipfile"
     if pipfile.is_file():
         text = pipfile.read_text(encoding="utf-8", errors="replace")
@@ -162,7 +482,7 @@ def inspect_repository_dependencies(workspace: Path) -> dict[str, Any]:
         manifests.append({"type": "Pipfile", "path": "Pipfile", "hash": h, "packages": pkgs})
         language = "python"
 
-    # 2. JavaScript / TypeScript
+    # 7. JavaScript / TypeScript
     pkg_json = workspace / "package.json"
     if pkg_json.is_file():
         try:
@@ -176,7 +496,7 @@ def inspect_repository_dependencies(workspace: Path) -> dict[str, Any]:
         except Exception:
             pass
 
-    # 3. Rust
+    # 8. Rust
     cargo_toml = workspace / "Cargo.toml"
     if cargo_toml.is_file():
         h = hashlib.sha256(cargo_toml.read_bytes()).hexdigest()
@@ -184,7 +504,7 @@ def inspect_repository_dependencies(workspace: Path) -> dict[str, Any]:
         if language == "unknown":
             language = "rust"
 
-    # 4. Go
+    # 9. Go
     go_mod = workspace / "go.mod"
     if go_mod.is_file():
         h = hashlib.sha256(go_mod.read_bytes()).hexdigest()
@@ -192,7 +512,7 @@ def inspect_repository_dependencies(workspace: Path) -> dict[str, Any]:
         if language == "unknown":
             language = "go"
 
-    # 5. Java
+    # 10. Java
     pom_xml = workspace / "pom.xml"
     if pom_xml.is_file():
         h = hashlib.sha256(pom_xml.read_bytes()).hexdigest()
@@ -200,7 +520,7 @@ def inspect_repository_dependencies(workspace: Path) -> dict[str, Any]:
         if language == "unknown":
             language = "java"
 
-    # 6. C/C++
+    # 11. C/C++
     cmake = workspace / "CMakeLists.txt"
     if cmake.is_file():
         h = hashlib.sha256(cmake.read_bytes()).hexdigest()
@@ -215,12 +535,15 @@ def inspect_repository_dependencies(workspace: Path) -> dict[str, Any]:
         combined_hasher.update(m["hash"].encode("utf-8"))
     combined_hash = combined_hasher.hexdigest()
 
+    req_python = detect_python_version_requirement(workspace)
+
     return {
         "language": language,
         "manifests": manifests,
         "declared_packages": sorted(declared_packages),
         "combined_hash": combined_hash,
         "has_manifest": len(manifests) > 0,
+        "required_python": req_python,
     }
 
 
@@ -234,6 +557,26 @@ def is_declared_dependency(module_name: str, declared_packages: list[str]) -> bo
     if dist_name and normalize_package_name(dist_name) in declared_set:
         return True
     return False
+
+
+def build_cache_key(
+    repo_name: str,
+    manifest_hash: str,
+    python_version: str,
+    platform_name: str | None = None,
+    arch_name: str | None = None,
+) -> str:
+    """
+    Generate an environment cache key incorporating repository name, platform,
+    architecture, Python major.minor version, and dependency manifest hash.
+    """
+    clean_repo = re.sub(r"[^a-zA-Z0-9_\-]+", "_", repo_name)
+    plat = (platform_name or sys.platform).lower()
+    arch = (arch_name or platform.machine()).lower()
+    # Normalize python tag to pyX.Y
+    py_parts = [p for p in re.findall(r"\d+", python_version)]
+    py_tag = f"py{py_parts[0]}.{py_parts[1]}" if len(py_parts) >= 2 else f"py{python_version}"
+    return f"{clean_repo}-{plat}-{arch}-{py_tag}-{manifest_hash[:16]}"
 
 
 async def prepare_environment(
@@ -254,6 +597,12 @@ async def prepare_environment(
     manifest_hash = dep_info["combined_hash"] or "no-manifest"
     started = time.perf_counter()
 
+    timeout_budget = float(settings.agentharness_dependency_timeout_seconds)
+    deadline = started + timeout_budget
+
+    def remaining_time() -> float:
+        return max(1.0, deadline - time.perf_counter())
+
     def emit(typ: str, msg: str, data: dict[str, Any] | None = None):
         if event_callback:
             event_callback(typ, msg, data or {})
@@ -264,21 +613,44 @@ async def prepare_environment(
             pkg = workspace / "package.json"
             if pkg.is_file() and not (workspace / "node_modules").exists() and shutil.which("npm"):
                 emit("dependency_preparation_started", "Installing JavaScript dependencies via npm", {"language": language})
-                try:
-                    proc = await asyncio.create_subprocess_exec(
-                        "npm", "install", "--no-audit", "--prefer-offline",
-                        cwd=workspace, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-                    )
-                    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=settings.agentharness_dependency_timeout_seconds)
-                    dur = round((time.perf_counter() - started) * 1000)
-                    if proc.returncode == 0:
-                        emit("dependencies_ready", "Node dependencies installed", {"duration_ms": dur})
-                        return {"status": "DEPENDENCIES_READY", "language": language, "duration_ms": dur, "cached": False, "declared_packages": declared_packages, "exit_code": 0, "output": stdout.decode(errors="replace")}
-                    else:
-                        emit("dependency_install_failed", "npm install exited with non-zero code", {"exit_code": proc.returncode})
-                        return {"status": "DEPENDENCY_INSTALL_FAILED", "language": language, "duration_ms": dur, "cached": False, "declared_packages": declared_packages, "exit_code": proc.returncode, "error": stderr.decode(errors="replace")}
-                except asyncio.TimeoutError:
-                    return {"status": "DEPENDENCY_INSTALL_BLOCKED", "language": language, "duration_ms": settings.agentharness_dependency_timeout_seconds * 1000, "error": "npm install timed out"}
+                rc, stdout, stderr, timed_out = await run_process_safely(
+                    ["npm", "install", "--no-audit", "--prefer-offline"],
+                    cwd=workspace,
+                    timeout=remaining_time(),
+                )
+                dur = round((time.perf_counter() - started) * 1000)
+                if timed_out:
+                    return {
+                        "status": "DEPENDENCY_INSTALL_BLOCKED",
+                        "language": language,
+                        "duration_ms": dur,
+                        "error": f"npm install timed out after {timeout_budget}s",
+                        "output": stdout + "\n" + stderr,
+                        "diagnostics": {"reason": "TIMEOUT", "timeout_seconds": timeout_budget, "elapsed_ms": dur},
+                    }
+                if rc == 0:
+                    emit("dependencies_ready", "Node dependencies installed", {"duration_ms": dur})
+                    return {
+                        "status": "DEPENDENCIES_READY",
+                        "language": language,
+                        "duration_ms": dur,
+                        "cached": False,
+                        "declared_packages": declared_packages,
+                        "exit_code": 0,
+                        "output": stdout,
+                    }
+                else:
+                    emit("dependency_install_failed", "npm install exited with non-zero code", {"exit_code": rc})
+                    return {
+                        "status": "DEPENDENCY_INSTALL_FAILED",
+                        "language": language,
+                        "duration_ms": dur,
+                        "cached": False,
+                        "declared_packages": declared_packages,
+                        "exit_code": rc,
+                        "error": stderr,
+                        "output": stdout + "\n" + stderr,
+                    }
         return {
             "status": "DEPENDENCIES_READY",
             "language": language,
@@ -289,174 +661,318 @@ async def prepare_environment(
             "output": f"Repository framework ({language}) detected; standard runtime environment active.",
         }
 
-    # Python virtual environment management
+    # Python interpreter resolution
+    selected_python, selected_py_ver, py_details = resolve_compatible_python(workspace)
+    if py_details.get("warning"):
+        emit("dependency_info", py_details["warning"], py_details)
+
+    # Build cache key incorporating platform, architecture, python version, and manifest hash
+    plat = sys.platform
+    arch = platform.machine().lower()
+    py_parts = [p for p in re.findall(r"\d+", selected_py_ver)]
+    py_major_minor = f"{py_parts[0]}.{py_parts[1]}" if len(py_parts) >= 2 else selected_py_ver
+
+    cache_key = build_cache_key(repo_name, manifest_hash, selected_py_ver, plat, arch)
     settings.venvs_root.mkdir(parents=True, exist_ok=True)
-    clean_repo_name = re.sub(r"[^a-zA-Z0-9_\-]+", "_", repo_name)
-    cache_key = f"{clean_repo_name}-{manifest_hash[:16]}"
     venv_dir = (settings.venvs_root / cache_key).resolve()
     ready_marker = venv_dir / ".agentharness_ready"
     python_bin = venv_dir / "bin" / "python"
     pytest_bin = venv_dir / "bin" / "pytest"
-
-    # Link run workspace .venv to the dedicated venv
     workspace_venv_link = workspace / ".venv"
 
     # Check cache validity
     if ready_marker.is_file() and python_bin.is_file() and pytest_bin.is_file():
         try:
             marker_data = json.loads(ready_marker.read_text(encoding="utf-8"))
-            if marker_data.get("hash") == manifest_hash:
-                dur = round((time.perf_counter() - started) * 1000)
-                if not workspace_venv_link.exists():
-                    try: workspace_venv_link.symlink_to(venv_dir, target_is_directory=True)
-                    except OSError: pass
-                emit("dependencies_ready", "Using cached Python virtual environment", {"venv": str(venv_dir), "duration_ms": dur})
-                return {
-                    "status": "DEPENDENCIES_READY",
-                    "language": "python",
-                    "cached": True,
-                    "duration_ms": dur,
-                    "manifest_hash": manifest_hash,
-                    "declared_packages": declared_packages,
-                    "venv_path": venv_dir,
-                    "python_bin": python_bin,
-                    "pytest_bin": pytest_bin,
-                    "exit_code": 0,
-                    "output": "Reused cached environment matching dependency manifest hash.",
-                }
+            m_hash = marker_data.get("hash")
+            m_plat = marker_data.get("platform")
+            m_arch = marker_data.get("architecture")
+            m_py = marker_data.get("python_version", "")
+
+            if (
+                m_hash == manifest_hash
+                and m_plat == plat
+                and m_arch == arch
+                and m_py.startswith(py_major_minor)
+                and marker_data.get("status") == "DEPENDENCIES_READY"
+            ):
+                # Fast sanity verification
+                rc, so, _, to = await run_process_safely(
+                    [str(python_bin), "-c", "import sys; print('ready')"],
+                    cwd=workspace,
+                    timeout=5.0,
+                )
+                if rc == 0 and "ready" in so:
+                    dur = round((time.perf_counter() - started) * 1000)
+                    if not workspace_venv_link.exists():
+                        try:
+                            workspace_venv_link.symlink_to(venv_dir, target_is_directory=True)
+                        except OSError:
+                            pass
+                    emit("dependencies_ready", "Using cached Python virtual environment", {
+                        "venv": str(venv_dir),
+                        "duration_ms": dur,
+                        "python_version": selected_py_ver,
+                        "manifest_hash": manifest_hash,
+                    })
+                    return {
+                        "status": "DEPENDENCIES_READY",
+                        "language": "python",
+                        "cached": True,
+                        "duration_ms": dur,
+                        "manifest_hash": manifest_hash,
+                        "declared_packages": declared_packages,
+                        "venv_path": venv_dir,
+                        "python_bin": python_bin,
+                        "pytest_bin": pytest_bin,
+                        "python_version": selected_py_ver,
+                        "python_executable": selected_python,
+                        "exit_code": 0,
+                        "output": "Reused cached environment matching dependency manifest hash.",
+                        "diagnostics": {},
+                    }
         except Exception:
             pass
 
-    emit("dependency_preparation_started", f"Provisioning isolated virtual environment for {repo_name}", {"cache_dir": str(venv_dir)})
+    emit("dependency_preparation_started", f"Provisioning isolated virtual environment for {repo_name}", {
+        "cache_dir": str(venv_dir),
+        "python": selected_python,
+        "python_version": selected_py_ver,
+    })
 
-    # Create fresh virtual environment in cache directory
+    # Create fresh virtual environment directory
     if venv_dir.exists():
         shutil.rmtree(venv_dir, ignore_errors=True)
     venv_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. Create venv
-    try:
-        proc_venv = await asyncio.create_subprocess_exec(
-            sys.executable, "-m", "venv", str(venv_dir),
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-        )
-        _, stderr_v = await asyncio.wait_for(proc_venv.communicate(), timeout=60)
-        if proc_venv.returncode != 0:
-            emit("dependency_install_failed", "Failed to create Python virtual environment", {"error": stderr_v.decode()})
-            return {
-                "status": "DEPENDENCY_INSTALL_FAILED",
-                "language": "python",
-                "duration_ms": round((time.perf_counter() - started) * 1000),
-                "error": f"venv creation failed: {stderr_v.decode(errors='replace')}",
-                "declared_packages": declared_packages,
-            }
-    except Exception as exc:
+    # 1. Create venv using selected Python interpreter
+    cmd_venv = [selected_python, "-m", "venv", str(venv_dir)]
+    rc_v, so_v, se_v, to_v = await run_process_safely(cmd_venv, cwd=workspace, timeout=min(60.0, remaining_time()))
+    if to_v:
+        dur = round((time.perf_counter() - started) * 1000)
         return {
             "status": "DEPENDENCY_INSTALL_BLOCKED",
             "language": "python",
-            "duration_ms": round((time.perf_counter() - started) * 1000),
-            "error": f"venv creation blocked: {exc}",
+            "duration_ms": dur,
+            "error": "Virtual environment creation timed out",
             "declared_packages": declared_packages,
+            "diagnostics": {
+                "reason": "TIMEOUT",
+                "timeout_seconds": 60,
+                "elapsed_ms": dur,
+                "actionable_suggestion": "Virtual environment creation exceeded 60s. Check host filesystem performance.",
+            },
+        }
+    if rc_v != 0:
+        dur = round((time.perf_counter() - started) * 1000)
+        emit("dependency_install_failed", "Failed to create Python virtual environment", {"error": se_v})
+        return {
+            "status": "DEPENDENCY_INSTALL_FAILED",
+            "language": "python",
+            "duration_ms": dur,
+            "error": f"venv creation failed: {se_v.strip() or so_v.strip()}",
+            "declared_packages": declared_packages,
+            "diagnostics": {
+                "reason": "VENV_CREATION_FAILED",
+                "exit_code": rc_v,
+                "stderr": se_v,
+                "python_executable": selected_python,
+                "actionable_suggestion": "Ensure the selected Python interpreter has the standard 'venv' module installed.",
+            },
         }
 
     pip_bin = venv_dir / "bin" / "pip"
-    combined_log: list[str] = []
+    pip_cache = settings.pip_cache_path
+    pip_cache.mkdir(parents=True, exist_ok=True)
 
-    # 2. Ensure pytest is installed in the isolated virtual environment
-    try:
-        cmd_pytest = [str(pip_bin), "install", "--prefer-binary", "pytest"]
-        proc_pt = await asyncio.create_subprocess_exec(*cmd_pytest, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-        so, se = await asyncio.wait_for(proc_pt.communicate(), timeout=settings.agentharness_dependency_timeout_seconds)
-        combined_log.append(sanitize_credentials(so.decode(errors="replace")))
-        if se:
-            combined_log.append(sanitize_credentials(se.decode(errors="replace")))
-    except asyncio.TimeoutError:
-        return {
-            "status": "DEPENDENCY_INSTALL_BLOCKED",
-            "language": "python",
-            "duration_ms": round((time.perf_counter() - started) * 1000),
-            "error": "pytest installation timed out",
-            "declared_packages": declared_packages,
-        }
+    # Base pip installation command with caching and robust flags
+    base_pip_cmd = [
+        str(pip_bin),
+        "install",
+        "--prefer-binary",
+        "--disable-pip-version-check",
+        "--no-input",
+        "--retries", "3",
+        "--timeout", "60",
+        "--cache-dir", str(pip_cache),
+    ]
 
-    # 3. Install declared dependencies
-    install_commands: list[list[str]] = []
-    # If requirements.txt present
+    # Optional user-configured index URLs
+    if getattr(settings, "agentharness_pip_index_url", None):
+        base_pip_cmd.extend(["--index-url", settings.agentharness_pip_index_url])
+    if getattr(settings, "agentharness_pip_extra_index_url", None):
+        base_pip_cmd.extend(["--extra-index-url", settings.agentharness_pip_extra_index_url])
+
+    # Optimize heavyweight ML dependencies: PyTorch CPU wheels for CPU-only environments
+    has_torch = any(p in declared_packages for p in ("torch", "torchvision", "torchaudio"))
+    if has_torch and not getattr(settings, "agentharness_pip_extra_index_url", None):
+        has_gpu = False
+        try:
+            if shutil.which("nvidia-smi"):
+                r_gpu = subprocess.run(["nvidia-smi"], capture_output=True, timeout=2)
+                has_gpu = (r_gpu.returncode == 0)
+        except Exception:
+            has_gpu = False
+        if not has_gpu:
+            base_pip_cmd.extend(["--extra-index-url", "https://download.pytorch.org/whl/cpu"])
+
+    # Prepare installation command arguments
+    install_targets: list[str] = ["pytest"]
+    req_file_found = False
+
     for m in manifests:
         if m["type"] == "requirements.txt":
             req_path = (workspace / m["path"]).resolve()
             if req_path.is_file():
-                install_commands.append([str(pip_bin), "install", "--prefer-binary", "-r", str(req_path)])
-        elif m["type"] in {"pyproject.toml", "setup.py"}:
-            install_commands.append([str(pip_bin), "install", "--prefer-binary", str(workspace)])
+                install_targets.extend(["-r", str(req_path)])
+                req_file_found = True
 
-    for cmd in install_commands:
-        cmd_str = " ".join(cmd)
-        emit("dependency_install_step", f"Running: {sanitize_credentials(cmd_str)}", {"command": cmd})
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd, cwd=workspace, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-            )
-            so, se = await asyncio.wait_for(proc.communicate(), timeout=settings.agentharness_dependency_timeout_seconds)
-            so_clean = sanitize_credentials(so.decode(errors="replace"))
-            se_clean = sanitize_credentials(se.decode(errors="replace"))
-            combined_log.append(so_clean)
-            if se_clean:
-                combined_log.append(se_clean)
+    if not req_file_found:
+        # If pyproject.toml, poetry.lock, or uv.lock without requirements.txt
+        if (workspace / "pyproject.toml").is_file():
+            install_targets.append(str(workspace))
+        elif declared_packages:
+            install_targets.extend(list(declared_packages))
 
-            if proc.returncode != 0:
-                full_log = "\n".join(combined_log)
-                dur = round((time.perf_counter() - started) * 1000)
-                # Check if failure is due to blocked network / authentication / unavailable package
-                is_blocked = (
-                    "Could not find a version that satisfies the requirement" in full_log
-                    or "401" in full_log
-                    or "403" in full_log
-                    or "ProxyError" in full_log
-                    or "Connection" in full_log
-                )
-                state = "DEPENDENCY_INSTALL_BLOCKED" if is_blocked else "DEPENDENCY_INSTALL_FAILED"
-                emit("dependency_install_failed", f"Dependency installation failed with code {proc.returncode}", {"state": state, "exit_code": proc.returncode})
-                return {
-                    "status": state,
-                    "language": "python",
-                    "duration_ms": dur,
-                    "cached": False,
-                    "manifest_hash": manifest_hash,
-                    "declared_packages": declared_packages,
-                    "venv_path": venv_dir,
-                    "exit_code": proc.returncode,
-                    "error": se_clean[:1000] or so_clean[:1000],
-                    "output": full_log[:5000],
-                }
-        except asyncio.TimeoutError:
-            dur = round((time.perf_counter() - started) * 1000)
-            emit("dependency_install_failed", f"Dependency installation timed out after {settings.agentharness_dependency_timeout_seconds}s", {})
+    full_install_cmd = base_pip_cmd + install_targets
+    cmd_str = sanitize_credentials(" ".join(full_install_cmd))
+    emit("dependency_install_step", f"Running: {cmd_str}", {"command": full_install_cmd})
+
+    rem_time = remaining_time()
+    rc, stdout, stderr, timed_out = await run_process_safely(
+        full_install_cmd,
+        cwd=workspace,
+        timeout=rem_time,
+    )
+
+    dur = round((time.perf_counter() - started) * 1000)
+    so_clean = sanitize_credentials(stdout)
+    se_clean = sanitize_credentials(stderr)
+    combined_log = so_clean + ("\n" + se_clean if se_clean else "")
+
+    if timed_out:
+        emit("dependency_install_failed", f"Dependency installation timed out after {timeout_budget}s", {"elapsed_ms": dur})
+        diagnostics = {
+            "reason": "TIMEOUT",
+            "timeout_seconds": timeout_budget,
+            "elapsed_ms": dur,
+            "python_version": selected_py_ver,
+            "python_executable": selected_python,
+            "failed_command": cmd_str,
+            "declared_packages": declared_packages,
+            "actionable_suggestion": (
+                f"Dependency installation exceeded {timeout_budget} seconds. "
+                "Consider increasing AGENTHARNESS_DEPENDENCY_TIMEOUT_SECONDS, "
+                "or ensure pre-built wheels are cached."
+            ),
+            "stderr_tail": se_clean[-2000:],
+            "stdout_tail": so_clean[-2000:],
+        }
+        return {
+            "status": "DEPENDENCY_INSTALL_BLOCKED",
+            "language": "python",
+            "duration_ms": dur,
+            "cached": False,
+            "manifest_hash": manifest_hash,
+            "declared_packages": declared_packages,
+            "venv_path": venv_dir,
+            "exit_code": -1,
+            "error": f"Dependency installation timed out after {timeout_budget}s (took {dur} ms).",
+            "output": combined_log[-5000:],
+            "diagnostics": diagnostics,
+        }
+
+    if rc != 0:
+        is_blocked = (
+            "Could not find a version that satisfies the requirement" in combined_log
+            or "No matching distribution found" in combined_log
+            or "401" in combined_log
+            or "403" in combined_log
+            or "404" in combined_log
+            or "ProxyError" in combined_log
+            or "Connection" in combined_log
+            or "Network is unreachable" in combined_log
+            or "SSLError" in combined_log
+        )
+        state = "DEPENDENCY_INSTALL_BLOCKED" if is_blocked else "DEPENDENCY_INSTALL_FAILED"
+        emit("dependency_install_failed", f"Dependency installation failed with code {rc}", {"state": state, "exit_code": rc})
+        diagnostics = {
+            "reason": "BLOCKED" if is_blocked else "FAILED",
+            "exit_code": rc,
+            "elapsed_ms": dur,
+            "python_version": selected_py_ver,
+            "python_executable": selected_python,
+            "failed_command": cmd_str,
+            "declared_packages": declared_packages,
+            "actionable_suggestion": (
+                "Package unavailable or network access blocked on package index."
+                if is_blocked else
+                "Review pip output for conflicting version constraints or missing system build dependencies."
+            ),
+            "stderr_tail": se_clean[-2000:],
+            "stdout_tail": so_clean[-2000:],
+        }
+        return {
+            "status": state,
+            "language": "python",
+            "duration_ms": dur,
+            "cached": False,
+            "manifest_hash": manifest_hash,
+            "declared_packages": declared_packages,
+            "venv_path": venv_dir,
+            "exit_code": rc,
+            "error": se_clean[-1000:] or so_clean[-1000:] or f"pip install exited with code {rc}",
+            "output": combined_log[-5000:],
+            "diagnostics": diagnostics,
+        }
+
+    # Verify pytest is available in venv
+    if not pytest_bin.is_file():
+        rc_pt, so_pt, se_pt, to_pt = await run_process_safely(
+            [str(pip_bin), "install", "--prefer-binary", "--cache-dir", str(pip_cache), "pytest"],
+            cwd=workspace,
+            timeout=remaining_time(),
+        )
+        if rc_pt != 0 or not pytest_bin.is_file():
+            emit("dependency_install_failed", "pytest installation failed", {"error": se_pt})
             return {
-                "status": "DEPENDENCY_INSTALL_BLOCKED",
+                "status": "DEPENDENCY_INSTALL_FAILED",
                 "language": "python",
-                "duration_ms": dur,
+                "duration_ms": round((time.perf_counter() - started) * 1000),
                 "cached": False,
                 "manifest_hash": manifest_hash,
                 "declared_packages": declared_packages,
-                "error": f"Dependency installation timed out after {settings.agentharness_dependency_timeout_seconds}s",
-                "output": "\n".join(combined_log)[:5000],
+                "venv_path": venv_dir,
+                "exit_code": rc_pt,
+                "error": "Failed to install pytest into virtual environment.",
+                "output": se_pt,
+                "diagnostics": {"reason": "PYTEST_INSTALL_FAILED", "stderr": se_pt},
             }
 
-    # Mark as ready
-    dur = round((time.perf_counter() - started) * 1000)
+    # Write readiness marker with comprehensive metadata
     ready_marker.write_text(json.dumps({
         "hash": manifest_hash,
         "repo": repo_name,
+        "python_version": selected_py_ver,
+        "python_executable": selected_python,
+        "platform": plat,
+        "architecture": arch,
         "created_at": time.time(),
         "declared_packages": declared_packages,
+        "status": "DEPENDENCIES_READY",
     }, indent=2), encoding="utf-8")
 
     if not workspace_venv_link.exists():
-        try: workspace_venv_link.symlink_to(venv_dir, target_is_directory=True)
-        except OSError: pass
+        try:
+            workspace_venv_link.symlink_to(venv_dir, target_is_directory=True)
+        except OSError:
+            pass
 
-    emit("dependencies_ready", f"Dependencies installed successfully into isolated venv ({dur} ms)", {"duration_ms": dur, "declared_packages": len(declared_packages)})
+    emit("dependencies_ready", f"Dependencies installed successfully into isolated venv ({dur} ms)", {
+        "duration_ms": dur,
+        "declared_packages": len(declared_packages),
+        "python_version": selected_py_ver,
+    })
 
     return {
         "status": "DEPENDENCIES_READY",
@@ -468,6 +984,9 @@ async def prepare_environment(
         "venv_path": venv_dir,
         "python_bin": python_bin,
         "pytest_bin": pytest_bin,
+        "python_version": selected_py_ver,
+        "python_executable": selected_python,
         "exit_code": 0,
-        "output": "\n".join(combined_log)[:5000],
+        "output": combined_log[-5000:],
+        "diagnostics": {},
     }

@@ -451,6 +451,174 @@ class RunManager:
                 repo.name,
                 event_callback=lambda typ, msg, data: self.event(run_id, typ, msg, data),
             )
+            dep_status = dep_info.get("status")
+
+            # Prevent pytest or agents from running if dependency preparation failed or timed out
+            if dep_status in {"DEPENDENCY_INSTALL_BLOCKED", "DEPENDENCY_INSTALL_FAILED"}:
+                error_msg = dep_info.get("error") or f"Dependency preparation halted ({dep_status})."
+                diagnostics = dep_info.get("diagnostics", {})
+                duration_ms = round((time.perf_counter() - started) * 1000)
+
+                self.event(
+                    run_id,
+                    "dependency_blocked",
+                    f"Dependency installation halted ({dep_status}): {error_msg}",
+                    {
+                        "dependency_status": dep_status,
+                        "error": error_msg,
+                        "diagnostics": diagnostics,
+                        "declared_packages": dep_info.get("declared_packages", []),
+                    },
+                )
+
+                dep_summary = {
+                    "status": dep_status,
+                    "language": dep_info.get("language", "python"),
+                    "duration_ms": dep_info.get("duration_ms", duration_ms),
+                    "cached": False,
+                    "declared_packages": dep_info.get("declared_packages", []),
+                    "manifest_hash": dep_info.get("manifest_hash"),
+                    "exit_code": dep_info.get("exit_code", -1),
+                    "error": error_msg,
+                    "diagnostics": diagnostics,
+                }
+
+                review_details = {
+                    "verdict": "BLOCKED",
+                    "review_state": "BLOCKED",
+                    "approved": False,
+                    "summary": f"Task execution halted because dependency preparation was blocked ({dep_status}): {error_msg}",
+                    "task_alignment": "",
+                    "test_evidence_verified": False,
+                    "rejection_reasons": [f"Dependency installation incomplete ({dep_status}): {error_msg}"],
+                    "verification_verdict": dep_status,
+                    "test_state": "BLOCKED",
+                    "regression_status": "BLOCKED",
+                    "baseline_comparison": {},
+                    "test_failure_details": [],
+                }
+
+                metrics = {
+                    "duration_ms": duration_ms,
+                    "inference_ms": 0,
+                    "tool_calls": 0,
+                    "agent_count": 0,
+                    "agent_handoffs": 0,
+                    "agent_metrics": {},
+                    "dependency_status": dep_status,
+                    "dependency_preparation": dep_summary,
+                    "test_state": "BLOCKED",
+                    "review_state": "BLOCKED",
+                    "verification_state": dep_status,
+                    "verification_verdict": dep_status,
+                    "regression_status": "BLOCKED",
+                    "baseline_comparison": {},
+                    "test_failure_details": [],
+                    "test_passed": False,
+                    "review_approved": False,
+                    "review_verdict": "BLOCKED",
+                    "review_reasons": review_details["rejection_reasons"],
+                    "tests_collected": 0,
+                    "tests_passed": 0,
+                    "tests_failed": 0,
+                    "tests_skipped": 0,
+                    "changed_files": 0,
+                    "tests": [],
+                    "security_review_included": False,
+                    "success_definition": "Relevant tests were collected and passed (PASS) and the code reviewer approved the diff.",
+                }
+
+                result = {
+                    "plan": {},
+                    "dependency_status": dep_status,
+                    "dependency_preparation": dep_summary,
+                    "verification_state": dep_status,
+                    "verification_verdict": dep_status,
+                    "test_state": "BLOCKED",
+                    "review_state": "BLOCKED",
+                    "regression_status": "BLOCKED",
+                    "baseline_comparison": {},
+                    "test_failure_details": [],
+                    "review_verdict": "BLOCKED",
+                    "review_approved": False,
+                    "test_passed": False,
+                    "success": False,
+                    "test_results": [],
+                    "test_metrics": {},
+                    "changed_files": [],
+                    "agent_outputs": {},
+                    "review_reasons": review_details["rejection_reasons"],
+                    "verification_error": error_msg,
+                    "metrics": metrics,
+                    "diagnostics": diagnostics,
+                }
+
+                evaluation_report = {
+                    "run_id": run_id,
+                    "repository": row["repository"],
+                    "task": row["task"],
+                    "verification_state": dep_status,
+                    "verification_verdict": dep_status,
+                    "success": False,
+                    "duration_ms": duration_ms,
+                    "dependency_preparation": dep_summary,
+                    "baseline_comparison": {},
+                    "regression_status": "BLOCKED",
+                    "test_results": {
+                        "outcome": "BLOCKED",
+                        "test_state": "BLOCKED",
+                        "passed": False,
+                        "metrics": {"collected": 0, "passed": 0, "failed": 0, "skipped": 0, "errors": 0},
+                        "failure_details": [],
+                        "runs": [],
+                    },
+                    "code_review": {
+                        "verdict": "BLOCKED",
+                        "review_state": "BLOCKED",
+                        "approved": False,
+                        "summary": review_details["summary"],
+                        "task_alignment": "",
+                        "rejection_reasons": review_details["rejection_reasons"],
+                    },
+                    "metrics": metrics,
+                    "diagnostics": diagnostics,
+                }
+                try:
+                    (workspace / "evaluation.json").write_text(json.dumps(evaluation_report, indent=2, ensure_ascii=False), encoding="utf-8")
+                    (self.settings.runs_root / run_id / "evaluation.json").write_text(json.dumps(evaluation_report, indent=2, ensure_ascii=False), encoding="utf-8")
+                except Exception:
+                    pass
+
+                self.db.update_run(
+                    run_id,
+                    status="failed",
+                    finished_at=utcnow(),
+                    duration_ms=duration_ms,
+                    success=0,
+                    total_tokens=0,
+                    prompt_tokens=0,
+                    completion_tokens=0,
+                    llm_calls=0,
+                    result_json=json.dumps(result, ensure_ascii=False),
+                    metrics_json=json.dumps(metrics),
+                    error=error_msg,
+                )
+
+                self.event(
+                    run_id,
+                    "verification_evaluated",
+                    f"Verification state: {dep_status}",
+                    {"verification_state": dep_status, "test_passed": False, "review_approved": False, "metrics": {"collected": 0, "passed": 0, "failed": 0, "skipped": 0, "errors": 0}}
+                )
+
+                self.event(
+                    run_id,
+                    "run_finished",
+                    f"Run finished ({dep_status}): {error_msg}",
+                    {"success": False, "verification_state": dep_status, "duration_ms": duration_ms, "total_tokens": 0, "llm_calls": 0, "metrics": metrics}
+                )
+                return
+
             venv_path = dep_info.get("venv_path")
             declared_packages = dep_info.get("declared_packages", [])
 
@@ -461,6 +629,7 @@ class RunManager:
                 venv_path=venv_path,
                 declared_packages=declared_packages,
                 event_callback=lambda typ, msg, data: self.event(run_id, typ, msg, data),
+                dependency_status=dep_status,
             )
             max_steps = min(max(int(row.get("max_agent_steps") or self.settings.agentharness_max_agent_steps), 1), 20)
             executor = AgentExecutor(self.llm, runtime,
