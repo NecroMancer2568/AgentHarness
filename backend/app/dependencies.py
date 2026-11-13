@@ -1428,11 +1428,18 @@ async def prepare_environment(
     started = time.perf_counter()
 
     has_heavyweight_ml = any(p in declared_packages for p in ("torch", "tensorflow", "transformers", "scipy", "triton"))
+    has_manifest_deps = bool(manifests and declared_packages)
     base_timeout = float(settings.agentharness_dependency_timeout_seconds)
-    # Heavyweight ML stacks (e.g. PyTorch + Transformers) require downloading >1.5GB of wheels.
-    # Automatically grant at least 1800s (30 minutes) if the configured timeout is lower,
-    # ensuring large binary wheels finish downloading on standard internet connections.
-    timeout_budget = max(base_timeout, 1800.0 if has_heavyweight_ml and base_timeout < 1800.0 else base_timeout)
+    # When dependencies are found, allow them to download completely:
+    # Heavyweight ML stacks (e.g. PyTorch + Transformers) require downloading large wheels: at least 1800s.
+    # Standard declared manifests receive ample time (at least 600s) to download completely.
+    # When no dependencies or manifests exist, searching/inference is bounded to at most 180s (3 minutes).
+    if has_heavyweight_ml:
+        timeout_budget = max(base_timeout, 1800.0)
+    elif has_manifest_deps:
+        timeout_budget = max(base_timeout, 600.0)
+    else:
+        timeout_budget = min(base_timeout, 180.0)
     deadline = started + timeout_budget
 
     def remaining_time() -> float:

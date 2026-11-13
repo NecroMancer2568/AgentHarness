@@ -466,6 +466,50 @@ class WorkflowTerminationTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertIn("event: done", chunks)
 
+    def test_missing_dependencies_and_tests_yields_success_with_warnings(self):
+        """Test 14: Missing dependencies/tests with implemented changes yields SUCCESS_WITH_WARNINGS."""
+        eval_res = evaluate_final_status(
+            dependency_status="DEPENDENCY_INSTALL_BLOCKED",
+            dependency_source="none",
+            has_manifest=False,
+            has_original_tests=False,
+            has_generated_tests=False,
+            implementation_status="IMPLEMENTED",
+            test_state="NO_TESTS",
+            alternative_verification={"passed": True, "details": "AST and syntax verification passed"},
+            review_details={"approved": True, "review_state": "APPROVED"},
+            error_message="Dependency installation skipped/incomplete",
+        )
+        self.assertEqual(eval_res["final_status"], "SUCCESS_WITH_WARNINGS")
+        self.assertEqual(eval_res["db_status"], "success_with_warnings")
+        self.assertTrue(eval_res["success"])
+        self.assertEqual(eval_res["verification_status"], "PARTIAL_VERIFICATION")
+        self.assertEqual(eval_res["repository_health"], "INCOMPLETE_INFRASTRUCTURE")
+        self.assertTrue(any("manifest" in w.lower() for w in eval_res["warnings"]))
+        self.assertTrue(any("test" in w.lower() for w in eval_res["warnings"]))
+        self.assertIsNotNone(eval_res["notification"])
+
+    def test_no_heartbeat_events_emitted_during_execution(self):
+        """Test 15: WorkflowTracker and RunManager emit zero heartbeat events."""
+        events_emitted = []
+
+        def event_cb(typ, msg, data, agent=None):
+            events_emitted.append(typ)
+
+        tracker = WorkflowTracker(
+            run_id="run-hb-check",
+            overall_timeout_seconds=60.0,
+            stage_timeout_seconds=10.0,
+            max_agent_handoffs=5,
+            event_callback=event_cb,
+        )
+        tracker.transition(WorkflowStage.PREPARING_DEPENDENCIES)
+        tracker.transition(WorkflowStage.CODING, agent="coding_agent")
+        tracker.transition(WorkflowStage.FINALIZING)
+
+        self.assertNotIn("stage_heartbeat", events_emitted)
+        self.assertNotIn("heartbeat", events_emitted)
+
 
 if __name__ == "__main__":
     unittest.main()

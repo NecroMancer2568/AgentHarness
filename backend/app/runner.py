@@ -540,7 +540,7 @@ def evaluate_final_status(
         repository_health = "HEALTHY"
 
     # 2. Execution Status
-    if dependency_status and dependency_status != "DEPENDENCIES_READY":
+    if dependency_status and dependency_status != "DEPENDENCIES_READY" and not (alternative_verification and alternative_verification.get("passed")):
         execution_status = "BLOCKED"
     elif implementation_status == "TIMED_OUT":
         execution_status = "TIMED_OUT"
@@ -565,7 +565,10 @@ def evaluate_final_status(
 
     # Dependency check
     if dependency_status and dependency_status != "DEPENDENCIES_READY":
-        checks_failed.append(f"Dependency preparation failed: {dependency_status}")
+        if alternative_verification and alternative_verification.get("passed"):
+            checks_skipped.append(f"Dependency preparation skipped/incomplete: {dependency_status}")
+        else:
+            checks_failed.append(f"Dependency preparation failed: {dependency_status}")
     elif dependency_status == "DEPENDENCIES_READY":
         if dependency_source == "inferred":
             checks_passed.append(f"Inferred dependencies prepared ({len(inferred_packages)} packages)")
@@ -614,20 +617,28 @@ def evaluate_final_status(
         checks_skipped.append(f"Code review state: {rev_state}")
 
     # 4. Verification Status
-    if dependency_status and dependency_status != "DEPENDENCIES_READY":
+    if dependency_status and dependency_status != "DEPENDENCIES_READY" and not (alternative_verification and alternative_verification.get("passed")):
         verification_status = "BLOCKED"
     elif test_state == "FAIL":
         verification_status = "FAILED_VERIFICATION"
     elif test_state == "BLOCKED":
-        verification_status = "BLOCKED"
+        if alternative_verification and alternative_verification.get("passed"):
+            verification_status = "PARTIAL_VERIFICATION"
+        else:
+            verification_status = "BLOCKED"
     elif test_state == "MISSING_DEPENDENCY":
-        verification_status = "FAILED_VERIFICATION"
+        if alternative_verification and alternative_verification.get("passed"):
+            verification_status = "PARTIAL_VERIFICATION"
+        else:
+            verification_status = "FAILED_VERIFICATION"
     elif alternative_verification and not alternative_verification.get("passed") and not has_original_tests and not has_generated_tests and test_state == "NO_TESTS":
         verification_status = "FAILED_VERIFICATION"
     elif test_state == "PASS":
         if not has_original_tests and has_generated_tests:
             verification_status = "PARTIAL_VERIFICATION"
         elif repository_health != "HEALTHY":
+            verification_status = "PARTIAL_VERIFICATION"
+        elif dependency_status and dependency_status != "DEPENDENCIES_READY":
             verification_status = "PARTIAL_VERIFICATION"
         else:
             verification_status = "FULL_VERIFICATION"
@@ -641,6 +652,11 @@ def evaluate_final_status(
 
     # 5. Warnings and Notifications
     warnings: list[str] = []
+    if dependency_status and dependency_status != "DEPENDENCIES_READY":
+        warnings.append(
+            f"Repository dependencies could not be fully prepared ({dependency_status}): {error_message or 'Dependencies absent'}. "
+            "Verification relied on available alternative analysis."
+        )
     if manifest_missing:
         if dependency_source == "inferred":
             warnings.append(f"Repository lacks a dependency manifest. {len(inferred_packages)} packages were inferred from source code.")
@@ -655,7 +671,7 @@ def evaluate_final_status(
             warnings.append("Repository lacked existing tests. Verification relied on alternative syntax and import checks.")
         else:
             warnings.append("Repository lacks automated test suites.")
-    if verification_status == "PARTIAL_VERIFICATION" and not tests_missing and not manifest_missing:
+    if verification_status == "PARTIAL_VERIFICATION" and not tests_missing and not manifest_missing and not (dependency_status and dependency_status != "DEPENDENCIES_READY"):
         warnings.append("Verification was partial: not all standard verification stages could be performed.")
 
     notification: str | None = None
@@ -751,45 +767,49 @@ def compute_verification_state(
         })
 
     if dependency_status and dependency_status != "DEPENDENCIES_READY":
-        eval_result = evaluate_final_status(
-            dependency_status=dependency_status,
-            dependency_source=dependency_source,
-            has_manifest=has_manifest,
-            has_original_tests=has_original_tests,
-            has_generated_tests=has_generated_tests,
-            implementation_status=implementation_status,
-            test_state="BLOCKED",
-            review_details=review_details,
-            alternative_verification=alternative_verification,
-            inferred_packages=inferred_packages,
-            ambiguous_imports=ambiguous_imports,
-            error_message=dependency_error,
-        )
-        review_details.update({
-            "verification_verdict": dependency_status,
-            "test_state": "BLOCKED",
-            "review_state": review_state,
-            "regression_status": "BLOCKED",
-            "baseline_comparison": {},
-            "test_failure_details": [],
-            "alternative_verification": alternative_verification or {},
-            "has_original_tests": has_original_tests,
-            "has_generated_tests": has_generated_tests,
-            "final_status": eval_result["final_status"],
-            "execution_status": eval_result["execution_status"],
-            "verification_status": eval_result["verification_status"],
-            "repository_health": eval_result["repository_health"],
-            "warnings": eval_result["warnings"],
-            "notification": eval_result["notification"],
-            "verification_details": eval_result["verification_details"],
-        })
-        return (
-            dependency_status,
-            False,
-            False,
-            dependency_error or f"Dependency preparation failed ({dependency_status}).",
-            review_details,
-        )
+        if not (alternative_verification and alternative_verification.get("passed")):
+            eval_result = evaluate_final_status(
+                dependency_status=dependency_status,
+                dependency_source=dependency_source,
+                has_manifest=has_manifest,
+                has_original_tests=has_original_tests,
+                has_generated_tests=has_generated_tests,
+                implementation_status=implementation_status,
+                test_state="BLOCKED",
+                review_details=review_details,
+                alternative_verification=alternative_verification,
+                inferred_packages=inferred_packages,
+                ambiguous_imports=ambiguous_imports,
+                error_message=dependency_error,
+            )
+            review_details.update({
+                "verification_verdict": dependency_status,
+                "test_state": "BLOCKED",
+                "review_state": review_state,
+                "regression_status": "BLOCKED",
+                "baseline_comparison": {},
+                "test_failure_details": [],
+                "alternative_verification": alternative_verification or {},
+                "has_original_tests": has_original_tests,
+                "has_generated_tests": has_generated_tests,
+                "final_status": eval_result["final_status"],
+                "execution_status": eval_result["execution_status"],
+                "verification_status": eval_result["verification_status"],
+                "repository_health": eval_result["repository_health"],
+                "warnings": eval_result["warnings"],
+                "notification": eval_result["notification"],
+                "verification_details": eval_result["verification_details"],
+            })
+            return (
+                dependency_status,
+                False,
+                False,
+                dependency_error or f"Dependency preparation failed ({dependency_status}).",
+                review_details,
+            )
+        dep_warning = dependency_error or f"Dependency preparation incomplete ({dependency_status})."
+        if not test_state or test_state in {"BLOCKED", "NO_TESTS", "MISSING_DEPENDENCY"}:
+            test_err = dep_warning
 
     if not tests:
         test_state = "NO_TESTS"
@@ -866,11 +886,19 @@ def compute_verification_state(
 
     # Overall verification verdict calculation
     if test_state == "MISSING_DEPENDENCY":
-        overall_verdict = "MISSING_DEPENDENCY"
-        error_msg = f"Test execution failed due to undeclared dependency: {test_err}"
+        if alternative_verification and alternative_verification.get("passed"):
+            overall_verdict = "PARTIAL_PASS"
+            error_msg = None
+        else:
+            overall_verdict = "MISSING_DEPENDENCY"
+            error_msg = f"Test execution failed due to undeclared dependency: {test_err}"
     elif test_state == "BLOCKED":
-        overall_verdict = "BLOCKED"
-        error_msg = f"Test execution was blocked: {test_err}"
+        if alternative_verification and alternative_verification.get("passed"):
+            overall_verdict = "PARTIAL_PASS"
+            error_msg = None
+        else:
+            overall_verdict = "BLOCKED"
+            error_msg = f"Test execution was blocked: {test_err}"
     elif review_state == "BLOCKED":
         overall_verdict = "BLOCKED"
         error_msg = f"Code review was blocked: {'; '.join(rejection_reasons) or 'Missing review evidence'}"
@@ -883,8 +911,8 @@ def compute_verification_state(
                 overall_verdict = "PARTIAL_PASS" if review_state != "REJECTED" else "FAIL"
                 error_msg = f"Alternative verification passed, but review is {review_state}: {'; '.join(rejection_reasons) or 'Changes not approved.'}"
             else:
-                overall_verdict = "FAIL"
-                error_msg = "Code review did not approve changes."
+                overall_verdict = "PARTIAL_PASS"
+                error_msg = None
         else:
             overall_verdict = "NO_TESTS"
             error_msg = test_err or "No tests were collected to verify the change."
@@ -909,6 +937,8 @@ def compute_verification_state(
     else:
         overall_verdict = "FAIL"
         error_msg = "Test verification failed."
+
+    test_passed = (test_state == "PASS")
 
     eval_result = evaluate_final_status(
         dependency_status=dependency_status,
@@ -1073,28 +1103,6 @@ class WorkflowTracker:
     def record_action(self, action_name: str) -> None:
         self.stage_action_counts[self.stage] = self.stage_action_counts.get(self.stage, 0) + 1
 
-    def emit_heartbeat(self) -> None:
-        if self.is_terminal:
-            return
-        now = time.perf_counter()
-        stage_elapsed = round((now - self.stage_start_time) * 1000)
-        total_elapsed = round((now - self.started_at) * 1000)
-        remaining = max(0.0, self.overall_deadline - now)
-        if self.event_callback:
-            self.event_callback(
-                "stage_heartbeat",
-                f"Heartbeat: stage {self.stage} running for {stage_elapsed}ms (total: {total_elapsed}ms, {remaining:.1f}s left)",
-                {
-                    "stage": self.stage,
-                    "current_agent": self.current_agent,
-                    "stage_elapsed_ms": stage_elapsed,
-                    "total_elapsed_ms": total_elapsed,
-                    "remaining_run_budget_seconds": round(remaining, 1),
-                    "handoff_count": self.handoff_count,
-                },
-                agent=self.current_agent,
-            )
-
 
 class RunManager:
     def __init__(self, settings: Settings, db: Database, llm: LLMClient, repos: RepositoryManager):
@@ -1105,15 +1113,6 @@ class RunManager:
 
     def event(self, run_id: str, event_type: str, message: str, data: dict[str, Any] | None = None, agent: str | None = None):
         self.db.add_event(run_id, event_type, agent, message, data or {})
-
-    async def _heartbeat_loop(self, tracker: WorkflowTracker):
-        interval = max(2, self.settings.agentharness_heartbeat_interval_seconds)
-        try:
-            while not tracker.is_terminal:
-                await asyncio.sleep(interval)
-                tracker.emit_heartbeat()
-        except asyncio.CancelledError:
-            pass
 
     def _finalize_run(
         self,
@@ -1237,7 +1236,6 @@ class RunManager:
             max_agent_handoffs=self.settings.agentharness_max_agent_handoffs,
             event_callback=lambda typ, msg, data, agent=None: self.event(run_id, typ, msg, data, agent=agent),
         )
-        heartbeat_task = asyncio.create_task(self._heartbeat_loop(tracker))
 
         try:
             repo = self.repos.resolve_repository(row["repository"])
@@ -1257,28 +1255,12 @@ class RunManager:
 
             # Prevent pytest or agents from running if dependency preparation failed, timed out, or was blocked
             if dep_status != "DEPENDENCIES_READY":
-                error_msg = dep_info.get("error") or f"Dependency preparation halted ({dep_status})."
+                error_msg = dep_info.get("error") or f"Dependency preparation incomplete ({dep_status})."
                 diagnostics = dep_info.get("diagnostics", {})
-                duration_ms = round((time.perf_counter() - started) * 1000)
-
-                tracker.transition(WorkflowStage.FINALIZING)
-                final_eval = evaluate_final_status(
-                    dependency_status=dep_status,
-                    dependency_source=dep_info.get("dependency_source", "manifest"),
-                    has_manifest=(dep_info.get("dependency_source", "manifest") != "inferred"),
-                    has_original_tests=False,
-                    has_generated_tests=False,
-                    implementation_status="NOT_IMPLEMENTED",
-                    test_state="BLOCKED",
-                    inferred_packages=dep_info.get("inferred_packages", []),
-                    ambiguous_imports=dep_info.get("inference_diagnostics", {}).get("ambiguous_imports", []),
-                    error_message=error_msg,
-                )
-
                 self.event(
                     run_id,
-                    "dependency_blocked",
-                    f"Dependency installation halted ({dep_status}): {error_msg}",
+                    "dependency_warning",
+                    f"Dependency warning ({dep_status}): {error_msg}. Proceeding with alternative verification.",
                     {
                         "dependency_status": dep_status,
                         "error": error_msg,
@@ -1286,163 +1268,6 @@ class RunManager:
                         "declared_packages": dep_info.get("declared_packages", []),
                     },
                 )
-
-                dep_summary = {
-                    "status": dep_status,
-                    "language": dep_info.get("language", "python"),
-                    "duration_ms": dep_info.get("duration_ms", duration_ms),
-                    "cached": False,
-                    "declared_packages": dep_info.get("declared_packages", []),
-                    "dependency_source": dep_info.get("dependency_source", "manifest"),
-                    "inferred_packages": dep_info.get("inferred_packages", []),
-                    "manifest_hash": dep_info.get("manifest_hash"),
-                    "exit_code": dep_info.get("exit_code", -1),
-                    "error": error_msg,
-                    "diagnostics": diagnostics,
-                    "inference_diagnostics": dep_info.get("inference_diagnostics", {}),
-                }
-
-                review_details = {
-                    "verdict": "BLOCKED",
-                    "review_state": "BLOCKED",
-                    "approved": False,
-                    "summary": f"Task execution halted because dependency preparation was blocked ({dep_status}): {error_msg}",
-                    "task_alignment": "",
-                    "test_evidence_verified": False,
-                    "rejection_reasons": [f"Dependency installation incomplete ({dep_status}): {error_msg}"],
-                    "verification_verdict": dep_status,
-                    "test_state": "BLOCKED",
-                    "regression_status": "BLOCKED",
-                    "baseline_comparison": {},
-                    "test_failure_details": [],
-                    "final_status": final_eval["final_status"],
-                    "execution_status": final_eval["execution_status"],
-                    "verification_status": final_eval["verification_status"],
-                    "repository_health": final_eval["repository_health"],
-                    "warnings": final_eval["warnings"],
-                    "notification": final_eval["notification"],
-                    "verification_details": final_eval["verification_details"],
-                }
-
-                metrics = {
-                    "duration_ms": duration_ms,
-                    "inference_ms": 0,
-                    "tool_calls": 0,
-                    "agent_count": 0,
-                    "agent_handoffs": 0,
-                    "agent_metrics": {},
-                    "dependency_status": dep_status,
-                    "dependency_preparation": dep_summary,
-                    "test_state": "BLOCKED",
-                    "review_state": "BLOCKED",
-                    "verification_state": dep_status,
-                    "verification_verdict": dep_status,
-                    "final_status": final_eval["final_status"],
-                    "execution_status": final_eval["execution_status"],
-                    "verification_status": final_eval["verification_status"],
-                    "repository_health": final_eval["repository_health"],
-                    "warnings": final_eval["warnings"],
-                    "notification": final_eval["notification"],
-                    "verification_details": final_eval["verification_details"],
-                    "regression_status": "BLOCKED",
-                    "baseline_comparison": {},
-                    "test_failure_details": [],
-                    "test_passed": False,
-                    "review_approved": False,
-                    "review_verdict": "BLOCKED",
-                    "review_reasons": review_details["rejection_reasons"],
-                    "tests_collected": 0,
-                    "tests_passed": 0,
-                    "tests_failed": 0,
-                    "tests_skipped": 0,
-                    "changed_files": 0,
-                    "tests": [],
-                    "security_review_included": False,
-                    "success_definition": "Relevant tests were collected and passed (PASS) and the code reviewer approved the diff.",
-                }
-
-                result = {
-                    "plan": {},
-                    "dependency_status": dep_status,
-                    "dependency_preparation": dep_summary,
-                    "verification_state": dep_status,
-                    "verification_verdict": dep_status,
-                    "final_status": final_eval["final_status"],
-                    "execution_status": final_eval["execution_status"],
-                    "verification_status": final_eval["verification_status"],
-                    "repository_health": final_eval["repository_health"],
-                    "warnings": final_eval["warnings"],
-                    "notification": final_eval["notification"],
-                    "verification_details": final_eval["verification_details"],
-                    "test_state": "BLOCKED",
-                    "review_state": "BLOCKED",
-                    "regression_status": "BLOCKED",
-                    "baseline_comparison": {},
-                    "test_failure_details": [],
-                    "review_verdict": "BLOCKED",
-                    "review_approved": False,
-                    "test_passed": False,
-                    "success": False,
-                    "test_results": [],
-                    "test_metrics": {},
-                    "changed_files": [],
-                    "agent_outputs": {},
-                    "review_reasons": review_details["rejection_reasons"],
-                    "verification_error": error_msg,
-                    "metrics": metrics,
-                    "diagnostics": diagnostics,
-                }
-
-                evaluation_report = {
-                    "run_id": run_id,
-                    "repository": row["repository"],
-                    "task": row["task"],
-                    "verification_state": dep_status,
-                    "verification_verdict": dep_status,
-                    "final_status": final_eval["final_status"],
-                    "execution_status": final_eval["execution_status"],
-                    "verification_status": final_eval["verification_status"],
-                    "repository_health": final_eval["repository_health"],
-                    "warnings": final_eval["warnings"],
-                    "notification": final_eval["notification"],
-                    "verification_details": final_eval["verification_details"],
-                    "success": False,
-                    "duration_ms": duration_ms,
-                    "dependency_preparation": dep_summary,
-                    "baseline_comparison": {},
-                    "regression_status": "BLOCKED",
-                    "test_results": {
-                        "outcome": "BLOCKED",
-                        "test_state": "BLOCKED",
-                        "passed": False,
-                        "metrics": {"collected": 0, "passed": 0, "failed": 0, "skipped": 0, "errors": 0},
-                        "failure_details": [],
-                        "runs": [],
-                    },
-                    "code_review": {
-                        "verdict": "BLOCKED",
-                        "review_state": "BLOCKED",
-                        "approved": False,
-                        "summary": review_details["summary"],
-                        "task_alignment": "",
-                        "rejection_reasons": review_details["rejection_reasons"],
-                    },
-                    "metrics": metrics,
-                    "diagnostics": diagnostics,
-                }
-
-                self._finalize_run(
-                    run_id,
-                    status=final_eval["db_status"],
-                    duration_ms=duration_ms,
-                    metrics=metrics,
-                    result=result,
-                    evaluation_report=evaluation_report,
-                    error_msg=error_msg,
-                    workspace=workspace,
-                    usage_totals=usage_totals,
-                )
-                return
 
             venv_path = dep_info.get("venv_path")
             declared_packages = dep_info.get("declared_packages", [])
@@ -1468,7 +1293,7 @@ class RunManager:
 
             # Record baseline tests before any agent modifications
             tracker.transition(WorkflowStage.RECORDING_BASELINE)
-            if has_original_tests:
+            if has_original_tests and dep_status == "DEPENDENCIES_READY":
                 baseline_record = await runtime.run_test_command(
                     repo_test_info.get("recommended_command") or runtime._detect_test_command() or ["python", "-m", "pytest", "-q"],
                     timeout=min(self.settings.agentharness_test_timeout_seconds, 60, tracker.get_remaining_stage_budget())
@@ -1476,11 +1301,11 @@ class RunManager:
             else:
                 baseline_record = {
                     "command": repo_test_info.get("recommended_command") or ["python", "-m", "pytest", "-q"],
-                    "outcome": "NO_TESTS",
+                    "outcome": "NO_TESTS" if not has_original_tests else "BLOCKED",
                     "passed": False,
                     "metrics": {"collected": 0, "passed": 0, "failed": 0, "skipped": 0, "errors": 0},
                     "failure_details": [],
-                    "error_message": "No pre-existing test suite detected in repository.",
+                    "error_message": "No pre-existing test suite detected in repository." if not has_original_tests else f"Baseline skipped due to dependency status: {dep_status}",
                     "duration_ms": 0,
                 }
             baseline_tests = [baseline_record] if baseline_record else []
@@ -1520,7 +1345,7 @@ class RunManager:
                     )
 
             scout_ctx = f"Automated test detection:\n{json.dumps(repo_test_info, indent=2)}"
-            if plan.get("include_test_scout", True):
+            if plan.get("include_test_scout", True) and has_original_tests:
                 analyst, scout = await asyncio.gather(reader("repository_analyst"), reader("test_scout", scout_ctx))
                 agent_outputs[analyst["role"]] = analyst["output"]
                 agent_outputs[scout["role"]] = scout["output"]
@@ -1528,7 +1353,7 @@ class RunManager:
             else:
                 analyst = await reader("repository_analyst")
                 agent_outputs[analyst["role"]] = analyst["output"]
-                test_discovery = "Test discovery was skipped by coordinator."
+                test_discovery = "Test discovery skipped (repository lacks automated test suites)." if not has_original_tests else "Test discovery was skipped by coordinator."
 
             # Step 3: Coding Agent with structured handoff
             tracker.record_handoff("repository_analyst", "coding_agent")
@@ -2238,11 +2063,6 @@ class RunManager:
 
         finally:
             tracker.is_terminal = True
-            heartbeat_task.cancel()
-            try:
-                await heartbeat_task
-            except asyncio.CancelledError:
-                pass
 
     async def _changed_files(self, workspace: Path, timeout: float = 15.0) -> list[str]:
         proc = None

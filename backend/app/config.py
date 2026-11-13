@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     agentharness_benchmark_sample_timeout_seconds: int = 1800
     agentharness_max_tool_output_chars: int = 12000
     agentharness_cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173,http://localhost:8080,http://127.0.0.1:8080,http://localhost,http://127.0.0.1"
-    agentharness_dependency_timeout_seconds: int = 300
+    agentharness_dependency_timeout_seconds: int = 180
     agentharness_overall_run_timeout_seconds: int = 900
     agentharness_stage_timeout_seconds: int = 180
     agentharness_heartbeat_interval_seconds: int = 10
