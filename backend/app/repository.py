@@ -917,8 +917,9 @@ class ToolRuntime:
 
     async def run_test_command(self, command: list[str], timeout: int) -> dict[str, Any]:
         """Execute test command, capturing stdout/stderr separately with metrics and outcome analysis."""
-        if getattr(self, "dependency_status", "DEPENDENCIES_READY") in {"DEPENDENCY_INSTALL_BLOCKED", "DEPENDENCY_INSTALL_FAILED"}:
-            err = f"Test execution prevented: dependency installation was not completed ({self.dependency_status})."
+        dep_status = getattr(self, "dependency_status", "DEPENDENCIES_READY")
+        if dep_status != "DEPENDENCIES_READY":
+            err = f"Test execution prevented: dependency installation was not completed ({dep_status})."
             self._emit("test_completed", err, {"outcome": "BLOCKED", "passed": False})
             res = {
                 "command": command,

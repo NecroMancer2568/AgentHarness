@@ -42,8 +42,8 @@ server {
         # Disable buffering for SSE streaming (/api/runs/:id/stream)
         proxy_buffering off;
         proxy_cache off;
-        proxy_read_timeout 600s;
-        proxy_send_timeout 600s;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
     }
 
     # SPA routing fallback

@@ -283,7 +283,7 @@ def compute_verification_state(
             "rejection_reasons": rejection_reasons,
         })
 
-    if dependency_status in {"DEPENDENCY_INSTALL_FAILED", "DEPENDENCY_INSTALL_BLOCKED"}:
+    if dependency_status and dependency_status != "DEPENDENCIES_READY":
         review_details.update({
             "verification_verdict": dependency_status,
             "test_state": "BLOCKED",
@@ -453,8 +453,8 @@ class RunManager:
             )
             dep_status = dep_info.get("status")
 
-            # Prevent pytest or agents from running if dependency preparation failed or timed out
-            if dep_status in {"DEPENDENCY_INSTALL_BLOCKED", "DEPENDENCY_INSTALL_FAILED"}:
+            # Prevent pytest or agents from running if dependency preparation failed, timed out, or was blocked
+            if dep_status != "DEPENDENCIES_READY":
                 error_msg = dep_info.get("error") or f"Dependency preparation halted ({dep_status})."
                 diagnostics = dep_info.get("diagnostics", {})
                 duration_ms = round((time.perf_counter() - started) * 1000)

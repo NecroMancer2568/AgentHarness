@@ -124,15 +124,21 @@ async def stream_events(run_id: str, request: Request, after_id: int = 0):
     if not db.get_run(run_id): raise HTTPException(404, "Run not found")
     async def generator():
         cursor = after_id
+        last_ping = time.monotonic()
         while not await request.is_disconnected():
             events = db.get_events(run_id, after_id=cursor, limit=100)
             for event in events:
                 cursor = event["id"]
                 yield f"id: {cursor}\nevent: {event['event_type']}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
+                last_ping = time.monotonic()
             row = db.get_run(run_id)
             if row and row["status"] in {"succeeded", "failed", "cancelled"} and not events:
                 yield "event: done\ndata: {}\n\n"
                 break
+            # Periodic SSE comment ping every 15s keeps proxies and browsers from timing out
+            if time.monotonic() - last_ping >= 15.0:
+                yield ": ping\n\n"
+                last_ping = time.monotonic()
             await asyncio.sleep(0.7)
     return StreamingResponse(generator(), media_type="text/event-stream", headers={"Cache-Control":"no-cache", "X-Accel-Buffering":"no"})
 

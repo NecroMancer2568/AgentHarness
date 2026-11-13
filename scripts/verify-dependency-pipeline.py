@@ -179,8 +179,51 @@ version = "0.28.0"
         print(f"    - Tests collected: {test_res['metrics']['collected']}")
         print(f"    - Error: {test_res['error_message']}")
 
+        # Scenario 7: Post-installation import verification gate
+        print("\n[Scenario 7] Testing post-installation import verification gate...")
+        ws_import = tmp_root / "import_repo"
+        ws_import.mkdir()
+        (ws_import / "requirements.txt").write_text("pandas\n")
+
+        async def mock_import_fail_proc(cmd, cwd, timeout, env=None):
+            cmd_str = " ".join(str(c) for c in cmd)
+            if "-m" in cmd and "venv" in cmd:
+                venv_dir = Path(cmd[cmd.index("venv") + 1])
+                (venv_dir / "bin").mkdir(parents=True, exist_ok=True)
+                (venv_dir / "bin" / "python").write_text("#!/bin/sh\nexit 0\n")
+                (venv_dir / "bin" / "python").chmod(0o755)
+                (venv_dir / "bin" / "pytest").write_text("#!/bin/sh\nexit 0\n")
+                (venv_dir / "bin" / "pytest").chmod(0o755)
+                return 0, "", "", False
+            if "install" in cmd:
+                return 0, "Successfully installed pandas", "", False
+            if "-c" in cmd:
+                return 1, "IMPORT_FAIL:pandas:pandas:ModuleNotFoundError: No module named 'pandas'\n", "", False
+            return 0, "", "", False
+
+        with patch("app.dependencies.run_process_safely", side_effect=mock_import_fail_proc):
+            res_import_fail = await prepare_environment(ws_import, settings, "import_repo")
+            assert res_import_fail["status"] == "DEPENDENCY_INSTALL_FAILED"
+            assert res_import_fail["diagnostics"]["reason"] == "IMPORT_VERIFICATION_FAILED"
+            assert res_import_fail["diagnostics"]["failed_package"] == "pandas"
+            assert not (res_import_fail["venv_path"] / ".agentharness_ready").exists()
+            print(f"  ✓ Post-installation import failure caught before writing .agentharness_ready:")
+            print(f"    - Status: {res_import_fail['status']}")
+            print(f"    - Failed Package: {res_import_fail['diagnostics']['failed_package']}")
+            print(f"    - Reason: {res_import_fail['diagnostics']['reason']}")
+
+        # Scenario 8: Granular error classification (OOM, Network, Timeout)
+        print("\n[Scenario 8] Testing granular error classification...")
+        from app.dependencies import classify_dependency_error
+        oom_status, oom_reason, _ = classify_dependency_error(137, False, "Killed", 300, 1000)
+        assert oom_status == "DEPENDENCY_INSTALL_OOM" and oom_reason == "OUT_OF_MEMORY"
+        net_status, net_reason, _ = classify_dependency_error(1, False, "Connection refused", 300, 1000)
+        assert net_status == "DEPENDENCY_INSTALL_NETWORK_ERROR" and net_reason == "NETWORK_ERROR"
+        print("  ✓ Correctly classified OOM (137/SIGKILL) -> DEPENDENCY_INSTALL_OOM")
+        print("  ✓ Correctly classified network errors -> DEPENDENCY_INSTALL_NETWORK_ERROR")
+
         print("\n" + "=" * 70)
-        print("ALL 6 VALIDATION SCENARIOS PASSED WITH ZERO ERRORS!")
+        print("ALL 8 VALIDATION SCENARIOS PASSED WITH ZERO ERRORS!")
         print("=" * 70)
 
     finally:
@@ -189,3 +232,4 @@ version = "0.28.0"
 
 if __name__ == "__main__":
     asyncio.run(main())
+

@@ -27,6 +27,10 @@ from app.dependencies import (
     is_declared_dependency,
     prepare_environment,
     DEPENDENCY_STATES,
+    AsyncFileLock,
+    get_system_resource_info,
+    verify_environment_imports,
+    classify_dependency_error,
 )
 from app.repository import ToolRuntime, parse_test_output
 from app.runner import compute_verification_state
@@ -432,6 +436,139 @@ class DependencyManagementTests(unittest.TestCase):
 
             pip_call_arm = next(c for c in captured_cmds if "install" in c)
             self.assertNotIn("https://download.pytorch.org/whl/cpu", pip_call_arm)
+
+    def test_classify_dependency_error_differentiation(self):
+        # 1. Timeout
+        status, reason, sug = classify_dependency_error(-1, True, "timed out", 300, 300000)
+        self.assertEqual(status, "DEPENDENCY_INSTALL_TIMEOUT")
+        self.assertEqual(reason, "TIMEOUT")
+
+        # 2. Out of Memory (code 137 or SIGKILL)
+        status, reason, sug = classify_dependency_error(137, False, "Killed", 300, 5000)
+        self.assertEqual(status, "DEPENDENCY_INSTALL_OOM")
+        self.assertEqual(reason, "OUT_OF_MEMORY")
+        self.assertIn("memory", sug.lower())
+
+        # 3. Network error
+        status, reason, sug = classify_dependency_error(1, False, "Connection reset by peer; Could not find a version that satisfies the requirement torch", 300, 5000)
+        self.assertEqual(status, "DEPENDENCY_INSTALL_NETWORK_ERROR")
+        self.assertEqual(reason, "NETWORK_ERROR")
+
+        # 4. Invalid environment
+        status, reason, sug = classify_dependency_error(127, False, "bad interpreter: /usr/bin/python: no such file or directory", 300, 100)
+        self.assertEqual(status, "DEPENDENCY_INSTALL_INVALID_ENVIRONMENT")
+        self.assertEqual(reason, "INVALID_ENVIRONMENT")
+
+        # 5. Build failure
+        status, reason, sug = classify_dependency_error(1, False, "gcc: error: compilation failed", 300, 5000)
+        self.assertEqual(status, "DEPENDENCY_INSTALL_FAILED")
+        self.assertEqual(reason, "INSTALL_FAILED")
+
+    def test_system_resource_telemetry(self):
+        res = get_system_resource_info()
+        self.assertIn("cpu_count", res)
+        self.assertGreater(res["cpu_count"], 0)
+        self.assertIn("platform", res)
+        self.assertIn("architecture", res)
+
+    def test_post_install_import_verification_failure_blocks_readiness(self):
+        workspace = self.tmp_dir / "broken_import_repo"
+        workspace.mkdir(parents=True)
+        (workspace / "requirements.txt").write_text("pandas\n")
+
+        # Mock run_process_safely: venv ok, pip ok, but import verification reports ModuleNotFoundError
+        async def mock_proc(cmd, cwd, timeout, env=None):
+            cmd_str = " ".join(str(c) for c in cmd)
+            if "-m" in cmd and "venv" in cmd:
+                venv_dir = Path(cmd[cmd.index("venv") + 1])
+                (venv_dir / "bin").mkdir(parents=True, exist_ok=True)
+                (venv_dir / "bin" / "python").write_text("#!/bin/sh\nexit 0\n")
+                (venv_dir / "bin" / "python").chmod(0o755)
+                (venv_dir / "bin" / "pytest").write_text("#!/bin/sh\nexit 0\n")
+                (venv_dir / "bin" / "pytest").chmod(0o755)
+                return 0, "", "", False
+            if "install" in cmd:
+                return 0, "Successfully installed pandas", "", False
+            if "-c" in cmd and "IMPORT_FAIL" in cmd_str:
+                # Simulate pandas missing or corrupted
+                return 1, "IMPORT_FAIL:pandas:pandas:ModuleNotFoundError: No module named 'pandas'\n", "", False
+            return 0, "", "", False
+
+        with patch("app.dependencies.run_process_safely", side_effect=mock_proc):
+            res = asyncio.run(prepare_environment(workspace, self.settings, "broken_import_repo"))
+            self.assertEqual(res["status"], "DEPENDENCY_INSTALL_FAILED")
+            self.assertEqual(res["diagnostics"]["reason"], "IMPORT_VERIFICATION_FAILED")
+            self.assertEqual(res["diagnostics"]["failed_package"], "pandas")
+            # Ready marker must NOT exist
+            ready_marker = res["venv_path"] / ".agentharness_ready"
+            self.assertFalse(ready_marker.exists())
+
+    def test_async_file_lock_mutual_exclusion(self):
+        lock_file = self.tmp_dir / "test_venv.lock"
+
+        async def run_locking_test():
+            lock1 = AsyncFileLock(lock_file, timeout=2.0)
+            async with lock1:
+                # Second lock must raise TimeoutError when timeout is small
+                lock2 = AsyncFileLock(lock_file, timeout=0.3)
+                try:
+                    import fcntl
+                    with self.assertRaises(TimeoutError):
+                        async with lock2:
+                            pass
+                except ImportError:
+                    pass
+
+        asyncio.run(run_locking_test())
+
+    def test_tool_runtime_blocks_tests_for_all_dependency_failure_states(self):
+        failure_states = [
+            "DEPENDENCY_INSTALL_BLOCKED",
+            "DEPENDENCY_INSTALL_TIMEOUT",
+            "DEPENDENCY_INSTALL_FAILED",
+            "DEPENDENCY_INSTALL_OOM",
+            "DEPENDENCY_INSTALL_NETWORK_ERROR",
+            "DEPENDENCY_INSTALL_INVALID_ENVIRONMENT",
+            "DEPENDENCY_CACHE_ERROR",
+        ]
+        workspace = self.tmp_dir / "tool_runtime_block_test"
+        workspace.mkdir(parents=True, exist_ok=True)
+
+        for state in failure_states:
+            runtime = ToolRuntime(
+                workspace,
+                self.settings,
+                "pytest",
+                dependency_status=state,
+            )
+            res = asyncio.run(runtime.run_test_command(["pytest", "-q"], timeout=10))
+            self.assertEqual(res["outcome"], "BLOCKED")
+            self.assertFalse(res["passed"])
+            self.assertEqual(res["metrics"]["collected"], 0)
+            self.assertIn(state, res["error_message"])
+
+    def test_compute_verification_state_preserves_all_failure_states(self):
+        failure_states = [
+            "DEPENDENCY_INSTALL_BLOCKED",
+            "DEPENDENCY_INSTALL_TIMEOUT",
+            "DEPENDENCY_INSTALL_FAILED",
+            "DEPENDENCY_INSTALL_OOM",
+            "DEPENDENCY_INSTALL_NETWORK_ERROR",
+            "DEPENDENCY_INSTALL_INVALID_ENVIRONMENT",
+            "DEPENDENCY_CACHE_ERROR",
+        ]
+        for state in failure_states:
+            verdict, passed, approved, err, details = compute_verification_state(
+                tests=[],
+                reviewer_output="VERDICT: APPROVE",
+                dependency_status=state,
+                dependency_error=f"Error code {state}",
+            )
+            self.assertEqual(verdict, state)
+            self.assertFalse(passed)
+            self.assertFalse(approved)
+            self.assertEqual(details["test_state"], "BLOCKED")
+            self.assertEqual(details["regression_status"], "BLOCKED")
 
 
 if __name__ == "__main__":
