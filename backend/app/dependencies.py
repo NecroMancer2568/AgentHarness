@@ -627,8 +627,9 @@ async def prepare_environment(
     has_heavyweight_ml = any(p in declared_packages for p in ("torch", "tensorflow", "transformers", "scipy", "triton"))
     base_timeout = float(settings.agentharness_dependency_timeout_seconds)
     # Heavyweight ML stacks (e.g. PyTorch + Transformers) require downloading >1.5GB of wheels.
-    # Automatically grant at least 600s if the configured timeout is lower, preventing premature aborts on initial downloads.
-    timeout_budget = max(base_timeout, 600.0 if has_heavyweight_ml and base_timeout < 600.0 else base_timeout)
+    # Automatically grant at least 1800s (30 minutes) if the configured timeout is lower,
+    # ensuring large binary wheels finish downloading on standard internet connections.
+    timeout_budget = max(base_timeout, 1800.0 if has_heavyweight_ml and base_timeout < 1800.0 else base_timeout)
     deadline = started + timeout_budget
 
     def remaining_time() -> float:
