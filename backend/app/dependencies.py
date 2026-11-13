@@ -32,6 +32,7 @@ IMPORT_TO_DISTRIBUTION = {
     "yaml": "pyyaml",
     "bs4": "beautifulsoup4",
     "pil": "pillow",
+    "PIL": "pillow",
     "cv2": "opencv-python",
     "dateutil": "python-dateutil",
     "dotenv": "python-dotenv",
@@ -41,6 +42,21 @@ IMPORT_TO_DISTRIBUTION = {
     "magic": "python-magic",
     "torch": "torch",
     "transformers": "transformers",
+    "jwt": "pyjwt",
+    "git": "gitpython",
+    "bio": "biopython",
+    "psycopg2": "psycopg2-binary",
+    "socks": "pysocks",
+    "docx": "python-docx",
+    "pptx": "python-pptx",
+    "fitz": "pymupdf",
+    "slugify": "python-slugify",
+    "levenshtein": "python-levenshtein",
+    "dns": "dnspython",
+    "attr": "attrs",
+    "pkg_resources": "setuptools",
+    "googleapiclient": "google-api-python-client",
+    "playwright": "playwright",
 }
 
 # Reverse mapping: distribution name to primary import module name
@@ -56,7 +72,292 @@ DISTRIBUTION_TO_IMPORT = {
     "python-multipart": "multipart",
     "pyserial": "serial",
     "python-magic": "magic",
+    "pyjwt": "jwt",
+    "gitpython": "git",
+    "biopython": "Bio",
+    "psycopg2-binary": "psycopg2",
+    "pysocks": "socks",
+    "python-docx": "docx",
+    "python-pptx": "pptx",
+    "pymupdf": "fitz",
+    "python-slugify": "slugify",
+    "python-levenshtein": "Levenshtein",
+    "dnspython": "dns",
+    "attrs": "attr",
+    "setuptools": "pkg_resources",
+    "google-api-python-client": "googleapiclient",
+    "playwright": "playwright",
 }
+
+def get_standard_library_modules() -> set[str]:
+    """Return Python standard library module names across Python versions."""
+    stdlib = set(getattr(sys, "stdlib_module_names", set()))
+    common_stdlib = {
+        "abc", "aifc", "antigravity", "argparse", "array", "ast", "asynchat", "asyncio",
+        "asyncore", "atexit", "audioop", "base64", "bdb", "binascii", "binhex", "bisect",
+        "builtins", "bz2", "cProfile", "calendar", "cgi", "cgitb", "chunk", "cmath", "cmd",
+        "code", "codecs", "codeop", "collections", "colorsys", "compileall", "concurrent",
+        "configparser", "contextlib", "contextvars", "copy", "copyreg", "crypt", "csv",
+        "ctypes", "curses", "dataclasses", "datetime", "dbm", "decimal", "difflib", "dis",
+        "distutils", "doctest", "email", "encodings", "ensurepip", "enum", "errno", "faulthandler",
+        "fcntl", "filecmp", "fileinput", "fnmatch", "fractions", "ftplib", "functools",
+        "gc", "getopt", "getpass", "gettext", "glob", "graphlib", "grp", "gzip", "hashlib",
+        "heapq", "hmac", "html", "http", "idlelib", "imaplib", "imghdr", "imp", "importlib",
+        "inspect", "io", "ipaddress", "itertools", "json", "keyword", "lib2to3", "linecache",
+        "locale", "logging", "lzma", "mailbox", "mailcap", "marshal", "math", "mimetypes",
+        "mmap", "modulefinder", "msilib", "msvcrt", "multiprocessing", "netrc", "nis",
+        "nntplib", "numbers", "operator", "optparse", "os", "ossaudiodev", "pathlib", "pdb",
+        "pickle", "pickletools", "pipes", "pkgutil", "platform", "plistlib", "poplib", "posix",
+        "posixpath", "pprint", "profile", "pstats", "pty", "pwd", "py_compile", "pyclbr",
+        "pydoc", "queue", "quopri", "random", "re", "readline", "reprlib", "resource",
+        "rlcompleter", "runpy", "sched", "secrets", "select", "selectors", "shelve", "shlex",
+        "shutil", "signal", "site", "smtpd", "smtplib", "sndhdr", "socket", "socketserver",
+        "spwd", "sqlite3", "sre_compile", "sre_constants", "sre_parse", "ssl", "stat",
+        "statistics", "string", "stringprep", "struct", "subprocess", "sunau", "symbol",
+        "symtable", "sys", "sysconfig", "syslog", "tabnanny", "tarfile", "telnetlib", "tempfile",
+        "termios", "test", "textwrap", "this", "threading", "time", "timeit", "tkinter",
+        "token", "tokenize", "tomllib", "trace", "traceback", "tracemalloc", "tty", "turtle",
+        "turtledemo", "types", "typing", "unicodedata", "unittest", "urllib", "uu", "uuid",
+        "venv", "warnings", "wave", "weakref", "webbrowser", "winreg", "winsound", "wsgiref",
+        "xdrlib", "xml", "xmlrpc", "zipapp", "zipfile", "zipimport", "zlib", "zoneinfo",
+        "__future__",
+    }
+    return stdlib.union(common_stdlib)
+
+def get_workspace_local_modules(workspace: Path) -> set[str]:
+    """Identify modules and packages located directly within the workspace."""
+    local_mods: set[str] = set()
+    ignored = {".git", ".venv", "venv", "venvs", "pip_cache", "site-packages", "__pycache__", "build", "dist", "node_modules"}
+
+    # Top-level python files (e.g. main.py -> main)
+    for p in workspace.iterdir():
+        if p.name in ignored or p.name.startswith("."):
+            continue
+        if p.is_file() and p.suffix == ".py":
+            local_mods.add(normalize_package_name(p.stem))
+        elif p.is_dir():
+            if (p / "__init__.py").exists() or any(p.glob("*.py")):
+                local_mods.add(normalize_package_name(p.name))
+
+    # Also inspect src/, app/, lib/ roots if they exist
+    for root_dir in ("src", "app", "lib"):
+        sub = workspace / root_dir
+        if sub.is_dir():
+            for p in sub.iterdir():
+                if p.name in ignored or p.name.startswith("."):
+                    continue
+                if p.is_file() and p.suffix == ".py":
+                    local_mods.add(normalize_package_name(p.stem))
+                elif p.is_dir() and ((sub / p.name / "__init__.py").exists() or any(p.glob("*.py"))):
+                    local_mods.add(normalize_package_name(p.name))
+
+    return local_mods
+
+KNOWN_THIRD_PARTY_PACKAGES = {
+    "requests", "urllib3", "httpx", "aiohttp", "flask", "django", "fastapi", "uvicorn", "starlette",
+    "pydantic", "pydantic-core", "pydantic-settings", "sqlalchemy", "alembic", "celery", "redis",
+    "numpy", "pandas", "scipy", "scikit-learn", "sklearn", "matplotlib", "seaborn", "plotly",
+    "torch", "torchvision", "torchaudio", "transformers", "accelerate", "datasets", "huggingface-hub",
+    "pytest", "pytest-cov", "pytest-asyncio", "pytest-mock", "mock", "unittest-mock",
+    "click", "typer", "rich", "tqdm", "colorama", "pyyaml", "yaml", "tomli", "tomllib", "toml",
+    "pillow", "pil", "opencv-python", "cv2", "beautifulsoup4", "bs4", "lxml", "html5lib",
+    "boto3", "botocore", "google-api-python-client", "google-cloud-storage", "azure-storage-blob",
+    "joblib", "yfinance", "networkx", "sympy", "statsmodels", "cryptography", "pyjwt", "jwt",
+    "psycopg2", "psycopg2-binary", "pymongo", "motor", "elastic-search", "elasticsearch",
+    "weaviate-client", "chromadb", "qdrant-client", "openai", "anthropic", "langchain",
+    "tenacity", "backoff", "attrs", "attr", "marshmallow", "cerberus", "jsonschema",
+    "paramiko", "fabric", "ansible", "docker", "kubernetes",
+}
+
+def scan_docker_and_readme_hints(workspace: Path) -> dict[str, Any]:
+    """Scan Dockerfiles, README, setup scripts for hints of declared dependencies."""
+    hints: set[str] = set()
+    sources: list[str] = []
+
+    pip_install_re = re.compile(r"(?:pip|pip3)\s+install\s+([^\n\r;&`]+)")
+    poetry_add_re = re.compile(r"poetry\s+add\s+([^\n\r;&`]+)")
+
+    files_to_check: list[Path] = []
+    files_to_check.extend(workspace.glob("Dockerfile*"))
+    files_to_check.extend(workspace.glob("*.dockerfile"))
+    files_to_check.extend(workspace.glob("README*"))
+    files_to_check.extend(workspace.glob("*.sh"))
+    files_to_check.extend(workspace.glob("scripts/*.sh"))
+
+    for f in files_to_check:
+        if not f.is_file() or any(p.startswith(".") for p in f.parts):
+            continue
+        try:
+            content = f.read_text(encoding="utf-8", errors="replace")
+            found_any = False
+            for m in pip_install_re.finditer(content):
+                cmd_args = m.group(1).split()
+                for arg in cmd_args:
+                    arg = arg.strip(" \t\n\r`\"'").strip()
+                    if arg.startswith("-") or not arg or "/" in arg or "\\" in arg:
+                        continue
+                    pkg = re.split(r"[=<>~!\s]", arg)[0].strip(" \t\n\r`\"'").strip()
+                    if pkg and re.match(r"^[a-zA-Z0-9_\-]+$", pkg):
+                        if pkg.lower() not in {"to", "start", "run", "the", "a", "an", "for", "in", "and", "or"}:
+                            hints.add(normalize_package_name(pkg))
+                            found_any = True
+            for m in poetry_add_re.finditer(content):
+                cmd_args = m.group(1).split()
+                for arg in cmd_args:
+                    arg = arg.strip(" \t\n\r`\"'").strip()
+                    if arg.startswith("-") or not arg:
+                        continue
+                    pkg = re.split(r"[=<>~!\s]", arg)[0].strip(" \t\n\r`\"'").strip()
+                    if pkg and re.match(r"^[a-zA-Z0-9_\-]+$", pkg):
+                        if pkg.lower() not in {"to", "start", "run", "the", "a", "an", "for", "in", "and", "or"}:
+                            hints.add(normalize_package_name(pkg))
+                            found_any = True
+            if found_any:
+                sources.append(str(f.relative_to(workspace)))
+        except Exception:
+            continue
+
+    return {"hints": hints, "sources": sources}
+
+def parse_conda_environment_yml(text: str) -> list[str]:
+    """Parse Conda environment.yml / environment.yaml dependencies."""
+    packages: list[str] = []
+    in_dependencies = False
+    in_pip = False
+
+    for line in text.splitlines():
+        trimmed = line.strip()
+        if not trimmed or trimmed.startswith("#"):
+            continue
+
+        if trimmed == "dependencies:":
+            in_dependencies = True
+            in_pip = False
+            continue
+
+        if in_dependencies:
+            indent = len(line) - len(line.lstrip())
+            if indent == 0 and not trimmed.startswith("-"):
+                in_dependencies = False
+                in_pip = False
+                continue
+
+            if "- pip:" in trimmed or trimmed == "pip:":
+                in_pip = True
+                continue
+
+            if in_pip:
+                if trimmed.startswith("-"):
+                    raw = trimmed.lstrip("-").strip()
+                    pkg = re.split(r"[=<>~!\s]", raw)[0].strip()
+                    if pkg:
+                        packages.append(normalize_package_name(pkg))
+                elif not trimmed.startswith("-") and indent <= 2:
+                    in_pip = False
+
+            elif trimmed.startswith("-"):
+                raw = trimmed.lstrip("-").strip()
+                if raw == "pip:":
+                    in_pip = True
+                    continue
+                pkg = re.split(r"[=<>~!\s]", raw)[0].strip()
+                if pkg and pkg.lower() not in {"python", "pip"}:
+                    packages.append(normalize_package_name(pkg))
+
+    return packages
+
+def infer_external_dependencies(workspace: Path) -> dict[str, Any]:
+    """
+    Intelligently infer third-party dependencies by AST scanning of all Python files,
+    excluding standard library and local workspace modules, mapping import names to PyPI
+    package distribution names, and incorporating hints from Dockerfiles/READMEs.
+    """
+    stdlib_modules = get_standard_library_modules()
+    local_modules = get_workspace_local_modules(workspace)
+    hints_data = scan_docker_and_readme_hints(workspace)
+    doc_hints = hints_data["hints"]
+
+    prod_imports: set[str] = set()
+    test_imports: set[str] = set()
+    ambiguous_imports: set[str] = set()
+
+    ignored_dirs = {".git", ".venv", "venv", "venvs", "pip_cache", "site-packages", "__pycache__", "build", "dist", "node_modules"}
+
+    for py_file in workspace.rglob("*.py"):
+        try:
+            rel_parts = py_file.relative_to(workspace).parts
+        except ValueError:
+            rel_parts = py_file.parts
+        if any(part.startswith(".") or part in ignored_dirs for part in rel_parts):
+            continue
+
+        try:
+            tree = ast.parse(py_file.read_text(encoding="utf-8", errors="replace"))
+        except (SyntaxError, Exception):
+            continue
+
+        is_test = "test" in py_file.name.lower() or any("test" in p.lower() for p in rel_parts[:-1])
+        target_set = test_imports if is_test else prod_imports
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    root_mod = alias.name.split(".")[0].strip()
+                    if root_mod:
+                        target_set.add(root_mod)
+            elif isinstance(node, ast.ImportFrom):
+                if node.level == 0 and node.module:
+                    root_mod = node.module.split(".")[0].strip()
+                    if root_mod:
+                        target_set.add(root_mod)
+
+    def process_imports(mod_set: set[str]) -> tuple[set[str], set[str], set[str], set[str]]:
+        ext_pkgs: set[str] = set()
+        loc_pkgs: set[str] = set()
+        std_pkgs: set[str] = set()
+        amb_pkgs: set[str] = set()
+
+        for mod in mod_set:
+            norm = normalize_package_name(mod)
+            if not re.match(r"^[a-zA-Z0-9_\-]+$", norm):
+                amb_pkgs.add(mod)
+                continue
+
+            if norm in local_modules or mod in local_modules:
+                loc_pkgs.add(mod)
+            elif norm in stdlib_modules or mod in stdlib_modules:
+                std_pkgs.add(mod)
+            else:
+                dist = IMPORT_TO_DISTRIBUTION.get(norm, IMPORT_TO_DISTRIBUTION.get(mod, norm))
+                norm_dist = normalize_package_name(dist)
+                ext_pkgs.add(norm_dist)
+                if (
+                    norm_dist not in KNOWN_THIRD_PARTY_PACKAGES
+                    and norm not in KNOWN_THIRD_PARTY_PACKAGES
+                    and norm not in IMPORT_TO_DISTRIBUTION
+                    and mod not in IMPORT_TO_DISTRIBUTION
+                    and norm not in doc_hints
+                ):
+                    amb_pkgs.add(mod)
+
+        return ext_pkgs, loc_pkgs, std_pkgs, amb_pkgs
+
+    prod_ext, prod_loc, prod_std, prod_amb = process_imports(prod_imports)
+    test_ext, test_loc, test_std, test_amb = process_imports(test_imports)
+
+    all_inferred = set(prod_ext).union(test_ext).union(doc_hints)
+    all_inferred = {p for p in all_inferred if p not in local_modules and p not in stdlib_modules}
+
+    return {
+        "inferred_packages": sorted(list(all_inferred)),
+        "production_packages": sorted(list(prod_ext)),
+        "test_packages": sorted(list(test_ext)),
+        "local_modules_detected": sorted(list(prod_loc.union(test_loc))),
+        "standard_library_detected": sorted(list(prod_std.union(test_std))),
+        "hints_from_docs": sorted(list(doc_hints)),
+        "hints_sources": hints_data["sources"],
+        "ambiguous_imports": sorted(list(prod_amb.union(test_amb))),
+    }
 
 DEPENDENCY_STATES = {
     "DEPENDENCIES_READY",
@@ -939,6 +1240,17 @@ def inspect_repository_dependencies(workspace: Path) -> dict[str, Any]:
         manifests.append({"type": "Pipfile", "path": "Pipfile", "hash": h, "packages": pkgs})
         language = "python"
 
+    # 6b. Conda environment.yml / environment.yaml
+    for env_name in ("environment.yml", "environment.yaml"):
+        env_file = workspace / env_name
+        if env_file.is_file():
+            text = env_file.read_text(encoding="utf-8", errors="replace")
+            pkgs = parse_conda_environment_yml(text)
+            declared_packages.update(pkgs)
+            h = hashlib.sha256(text.encode("utf-8")).hexdigest()
+            manifests.append({"type": "environment.yml", "path": env_name, "hash": h, "packages": pkgs})
+            language = "python"
+
     # 7. JavaScript / TypeScript
     pkg_json = workspace / "package.json"
     if pkg_json.is_file():
@@ -952,6 +1264,12 @@ def inspect_repository_dependencies(workspace: Path) -> dict[str, Any]:
                 language = "javascript/typescript"
         except Exception:
             pass
+
+    for lock in ("package-lock.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb"):
+        lf = workspace / lock
+        if lf.is_file():
+            h = hashlib.sha256(lf.read_bytes()).hexdigest()
+            manifests.append({"type": lock, "path": lock, "hash": h, "packages": []})
 
     # 8. Rust
     cargo_toml = workspace / "Cargo.toml"
@@ -977,6 +1295,14 @@ def inspect_repository_dependencies(workspace: Path) -> dict[str, Any]:
         if language == "unknown":
             language = "java"
 
+    for g_file in ("build.gradle", "build.gradle.kts"):
+        gf = workspace / g_file
+        if gf.is_file():
+            h = hashlib.sha256(gf.read_bytes()).hexdigest()
+            manifests.append({"type": g_file, "path": g_file, "hash": h, "packages": []})
+            if language == "unknown":
+                language = "java"
+
     # 11. C/C++
     cmake = workspace / "CMakeLists.txt"
     if cmake.is_file():
@@ -984,6 +1310,47 @@ def inspect_repository_dependencies(workspace: Path) -> dict[str, Any]:
         manifests.append({"type": "CMakeLists.txt", "path": "CMakeLists.txt", "hash": h, "packages": []})
         if language == "unknown":
             language = "c_cpp"
+
+    has_manifest = len(manifests) > 0
+    inference_diagnostics: dict[str, Any] = {}
+    inferred_packages: list[str] = []
+    dependency_source = "manifest" if has_manifest else "none"
+
+    # Adaptive dependency detection: when no manifest exists for a Python repository
+    has_python_files = bool(list(workspace.glob("*.py")) or list(workspace.glob("*/*.py")) or list(workspace.glob("**/*.py")))
+    if not has_manifest and (language == "python" or has_python_files):
+        language = "python"
+        inference = infer_external_dependencies(workspace)
+        inference_diagnostics = inference
+        inferred_packages = inference.get("inferred_packages", [])
+
+        if inferred_packages:
+            dependency_source = "inferred"
+            inferred_file = workspace / ".agentharness_inferred_requirements.txt"
+            inferred_content = "\n".join(inferred_packages) + "\n"
+            inferred_file.write_text(inferred_content, encoding="utf-8")
+
+            # Prevent git contamination by excluding the temporary manifest
+            git_info = workspace / ".git" / "info"
+            if git_info.is_dir() or (workspace / ".git").is_dir():
+                try:
+                    git_info.mkdir(parents=True, exist_ok=True)
+                    exclude_file = git_info / "exclude"
+                    cur_ex = exclude_file.read_text(encoding="utf-8") if exclude_file.is_file() else ""
+                    if ".agentharness_inferred_requirements.txt" not in cur_ex:
+                        exclude_file.write_text(cur_ex.rstrip() + "\n.agentharness_inferred_requirements.txt\n", encoding="utf-8")
+                except Exception:
+                    pass
+
+            h = hashlib.sha256(inferred_content.encode("utf-8")).hexdigest()
+            manifests.append({
+                "type": "inferred_requirements.txt",
+                "path": ".agentharness_inferred_requirements.txt",
+                "hash": h,
+                "packages": inferred_packages,
+                "inferred": True,
+            })
+            declared_packages.update(inferred_packages)
 
     # Combined hash across all manifests
     combined_hasher = hashlib.sha256()
@@ -998,9 +1365,12 @@ def inspect_repository_dependencies(workspace: Path) -> dict[str, Any]:
         "language": language,
         "manifests": manifests,
         "declared_packages": sorted(declared_packages),
+        "inferred_packages": sorted(inferred_packages),
+        "dependency_source": dependency_source,
         "combined_hash": combined_hash,
-        "has_manifest": len(manifests) > 0,
+        "has_manifest": has_manifest,
         "required_python": req_python,
+        "inference_diagnostics": inference_diagnostics,
     }
 
 
@@ -1051,6 +1421,9 @@ async def prepare_environment(
     language = dep_info["language"]
     manifests = dep_info["manifests"]
     declared_packages = dep_info["declared_packages"]
+    inferred_packages = dep_info.get("inferred_packages", [])
+    dependency_source = dep_info.get("dependency_source", "manifest")
+    inference_diagnostics = dep_info.get("inference_diagnostics", {})
     manifest_hash = dep_info["combined_hash"] or "no-manifest"
     started = time.perf_counter()
 
@@ -1192,6 +1565,8 @@ async def prepare_environment(
                                 "duration_ms": dur,
                                 "manifest_hash": manifest_hash,
                                 "declared_packages": declared_packages,
+                                "inferred_packages": marker_data.get("inferred_packages", inferred_packages),
+                                "dependency_source": marker_data.get("dependency_source", dependency_source),
                                 "venv_path": venv_dir,
                                 "python_bin": python_bin,
                                 "pytest_bin": pytest_bin,
@@ -1209,6 +1584,8 @@ async def prepare_environment(
                                     "pytorch_telemetry": marker_data.get("pytorch_info", {}).get("pip_telemetry", {}),
                                     "pytorch_wheel_check": wheel_check,
                                     "cuda_packages_detected_on_cpu": False,
+                                    "dependency_source": marker_data.get("dependency_source", dependency_source),
+                                    "inferred_packages": marker_data.get("inferred_packages", inferred_packages),
                                 },
                             }
                 except Exception:
@@ -1311,17 +1688,17 @@ async def prepare_environment(
             applicable_manifests = manifests
             if not has_gpu:
                 has_cpu_or_std = any(
-                    m["type"] == "requirements.txt" and not any(k in m["path"].lower() for k in ("gpu", "cuda"))
+                    m["type"] in {"requirements.txt", "inferred_requirements.txt"} and not any(k in m["path"].lower() for k in ("gpu", "cuda"))
                     for m in manifests
                 )
                 if has_cpu_or_std:
                     applicable_manifests = [
                         m for m in manifests
-                        if not (m["type"] == "requirements.txt" and any(k in m["path"].lower() for k in ("gpu", "cuda")))
+                        if not (m["type"] in {"requirements.txt", "inferred_requirements.txt"} and any(k in m["path"].lower() for k in ("gpu", "cuda")))
                     ]
 
             for m in applicable_manifests:
-                if m["type"] == "requirements.txt":
+                if m["type"] in {"requirements.txt", "inferred_requirements.txt"}:
                     req_path = (workspace / m["path"]).resolve()
                     if req_path.is_file():
                         install_targets.extend(["-r", str(req_path)])
@@ -1534,6 +1911,8 @@ async def prepare_environment(
                 "architecture": arch,
                 "created_at": time.time(),
                 "declared_packages": declared_packages,
+                "inferred_packages": inferred_packages,
+                "dependency_source": dependency_source,
                 "status": "DEPENDENCIES_READY",
                 "verified_imports": True,
                 "gpu_profile": {
@@ -1558,6 +1937,8 @@ async def prepare_environment(
             emit("dependencies_ready", f"Dependencies installed successfully into isolated venv ({dur} ms)", {
                 "duration_ms": dur,
                 "declared_packages": len(declared_packages),
+                "inferred_packages": len(inferred_packages),
+                "dependency_source": dependency_source,
                 "python_version": selected_py_ver,
             })
 
@@ -1568,6 +1949,8 @@ async def prepare_environment(
                 "duration_ms": dur,
                 "manifest_hash": manifest_hash,
                 "declared_packages": declared_packages,
+                "inferred_packages": inferred_packages,
+                "dependency_source": dependency_source,
                 "venv_path": venv_dir,
                 "python_bin": python_bin,
                 "pytest_bin": pytest_bin,
@@ -1585,6 +1968,9 @@ async def prepare_environment(
                     "pytorch_telemetry": pip_telemetry,
                     "pytorch_wheel_check": wheel_check,
                     "cuda_packages_detected_on_cpu": cuda_on_cpu,
+                    "dependency_source": dependency_source,
+                    "inferred_packages": inferred_packages,
+                    "inference_diagnostics": inference_diagnostics,
                 },
             }
 

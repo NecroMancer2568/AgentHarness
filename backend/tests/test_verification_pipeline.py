@@ -15,6 +15,7 @@ from app.repository import (
 from app.runner import (
     classify_changed_files,
     compute_verification_state,
+    evaluate_final_status,
     is_implementation_task,
     is_test_or_meta_file,
     parse_reviewer_verdict,
@@ -410,6 +411,271 @@ class VerificationPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(ra)
         self.assertTrue(details["baseline_comparison"]["failure_to_pass_verified"])
         self.assertTrue(details["baseline_comparison"]["reproduced_on_baseline"])
+
+    # --- 14 Intelligent Completion Status & Warning Tests ---
+
+    def test_status_scenario_1_complete_repo_with_passing_tests(self):
+        """Scenario 1: Complete repository with passing tests -> SUCCESS."""
+        res = evaluate_final_status(
+            has_manifest=True,
+            has_original_tests=True,
+            test_state="PASS",
+            test_metrics={"collected": 5, "passed": 5, "failed": 0},
+            review_details={"approved": True, "review_state": "APPROVED"},
+        )
+        self.assertEqual(res["final_status"], "SUCCESS")
+        self.assertEqual(res["execution_status"], "COMPLETED")
+        self.assertEqual(res["verification_status"], "FULL_VERIFICATION")
+        self.assertEqual(res["repository_health"], "HEALTHY")
+        self.assertTrue(res["success"])
+        self.assertEqual(res["db_status"], "succeeded")
+        self.assertEqual(res["warnings"], [])
+        self.assertIsNone(res["notification"])
+        self.assertIn("Original test suite passed (5 passed)", res["verification_details"]["checks_passed"])
+
+    def test_status_scenario_2_missing_manifest_with_successful_inference(self):
+        """Scenario 2: Missing dependency manifest with successful dependency inference -> SUCCESS_WITH_WARNINGS."""
+        res = evaluate_final_status(
+            dependency_status="DEPENDENCIES_READY",
+            dependency_source="inferred",
+            has_manifest=False,
+            has_original_tests=True,
+            test_state="PASS",
+            test_metrics={"collected": 3, "passed": 3, "failed": 0},
+            review_details={"approved": True, "review_state": "APPROVED"},
+            inferred_packages=["fastapi", "uvicorn"],
+        )
+        self.assertEqual(res["final_status"], "SUCCESS_WITH_WARNINGS")
+        self.assertEqual(res["execution_status"], "COMPLETED")
+        self.assertEqual(res["repository_health"], "MISSING_MANIFEST")
+        self.assertTrue(res["success"])
+        self.assertEqual(res["db_status"], "success_with_warnings")
+        self.assertTrue(any("dependency manifest" in w.lower() for w in res["warnings"]))
+        self.assertIsNotNone(res["notification"])
+        self.assertIn("Inferred dependencies prepared (2 packages)", res["verification_details"]["checks_passed"])
+
+    def test_status_scenario_3_missing_manifest_with_failed_inference(self):
+        """Scenario 3: Missing dependency manifest with failed inference -> FAILED."""
+        res = evaluate_final_status(
+            dependency_status="DEPENDENCY_INFERENCE_FAILED",
+            dependency_source="inferred",
+            has_manifest=False,
+            has_original_tests=True,
+            test_state="BLOCKED",
+            error_message="Could not resolve imports",
+        )
+        self.assertEqual(res["final_status"], "FAILED")
+        self.assertEqual(res["execution_status"], "BLOCKED")
+        self.assertEqual(res["verification_status"], "BLOCKED")
+        self.assertEqual(res["repository_health"], "MISSING_MANIFEST")
+        self.assertFalse(res["success"])
+        self.assertEqual(res["db_status"], "failed")
+
+    def test_status_scenario_4_missing_existing_tests_with_generated_tests(self):
+        """Scenario 4: Missing existing tests with successful generated regression tests -> SUCCESS_WITH_WARNINGS."""
+        res = evaluate_final_status(
+            has_manifest=True,
+            has_original_tests=False,
+            has_generated_tests=True,
+            test_state="PASS",
+            test_metrics={"collected": 4, "passed": 4, "failed": 0},
+            review_details={"approved": True, "review_state": "APPROVED"},
+        )
+        self.assertEqual(res["final_status"], "SUCCESS_WITH_WARNINGS")
+        self.assertEqual(res["execution_status"], "COMPLETED")
+        self.assertEqual(res["verification_status"], "PARTIAL_VERIFICATION")
+        self.assertEqual(res["repository_health"], "MISSING_TESTS")
+        self.assertTrue(res["success"])
+        self.assertEqual(res["db_status"], "success_with_warnings")
+        self.assertTrue(any("generated regression tests" in w for w in res["warnings"]))
+        self.assertIn("Generated regression test suite passed (4 passed)", res["verification_details"]["checks_passed"])
+        self.assertIn("Original test suite not found in repository", res["verification_details"]["checks_skipped"])
+
+    def test_status_scenario_5_missing_tests_with_alternative_validation(self):
+        """Scenario 5: Missing tests with successful alternative validation only -> SUCCESS_WITH_WARNINGS."""
+        res = evaluate_final_status(
+            has_manifest=True,
+            has_original_tests=False,
+            has_generated_tests=False,
+            test_state="NO_TESTS",
+            alternative_verification={"passed": True, "details": "AST checks passed for 2 files"},
+            review_details={"approved": True, "review_state": "APPROVED"},
+        )
+        self.assertEqual(res["final_status"], "SUCCESS_WITH_WARNINGS")
+        self.assertEqual(res["execution_status"], "COMPLETED")
+        self.assertEqual(res["verification_status"], "PARTIAL_VERIFICATION")
+        self.assertEqual(res["repository_health"], "MISSING_TESTS")
+        self.assertTrue(res["success"])
+        self.assertEqual(res["db_status"], "success_with_warnings")
+        self.assertTrue(any("alternative" in w.lower() for w in res["warnings"]))
+        self.assertTrue(any("Alternative validation passed" in c for c in res["verification_details"]["checks_passed"]))
+
+    def test_status_scenario_6_missing_dependencies_and_tests_together(self):
+        """Scenario 6: Missing dependencies and tests together -> SUCCESS_WITH_WARNINGS."""
+        res = evaluate_final_status(
+            dependency_status="DEPENDENCIES_READY",
+            dependency_source="inferred",
+            has_manifest=False,
+            has_original_tests=False,
+            has_generated_tests=True,
+            test_state="PASS",
+            test_metrics={"collected": 2, "passed": 2, "failed": 0},
+            review_details={"approved": True, "review_state": "APPROVED"},
+            inferred_packages=["pandas"],
+        )
+        self.assertEqual(res["final_status"], "SUCCESS_WITH_WARNINGS")
+        self.assertEqual(res["execution_status"], "COMPLETED")
+        self.assertEqual(res["verification_status"], "PARTIAL_VERIFICATION")
+        self.assertEqual(res["repository_health"], "INCOMPLETE_INFRASTRUCTURE")
+        self.assertTrue(res["success"])
+        self.assertEqual(res["db_status"], "success_with_warnings")
+        self.assertGreaterEqual(len(res["warnings"]), 2)
+
+    def test_status_scenario_7_dependency_installation_failure(self):
+        """Scenario 7: Dependency installation failure -> FAILED."""
+        res = evaluate_final_status(
+            dependency_status="DEPENDENCY_INSTALL_BLOCKED",
+            dependency_source="manifest",
+            has_manifest=True,
+            has_original_tests=True,
+        )
+        self.assertEqual(res["final_status"], "FAILED")
+        self.assertEqual(res["execution_status"], "BLOCKED")
+        self.assertEqual(res["verification_status"], "BLOCKED")
+        self.assertFalse(res["success"])
+        self.assertEqual(res["db_status"], "failed")
+
+    def test_status_scenario_8_generated_regression_tests_failing(self):
+        """Scenario 8: Generated regression tests failing -> FAILED."""
+        res = evaluate_final_status(
+            has_manifest=True,
+            has_original_tests=False,
+            has_generated_tests=True,
+            test_state="FAIL",
+            test_metrics={"collected": 3, "passed": 2, "failed": 1},
+            review_details={"approved": True, "review_state": "APPROVED"},
+        )
+        self.assertEqual(res["final_status"], "FAILED")
+        self.assertEqual(res["verification_status"], "FAILED_VERIFICATION")
+        self.assertFalse(res["success"])
+        self.assertEqual(res["db_status"], "failed")
+        self.assertIn("Generated regression test suite failed (1 failed)", res["verification_details"]["checks_failed"])
+
+    def test_status_scenario_9_existing_regression_tests_failing(self):
+        """Scenario 9: Existing regression tests failing -> FAILED."""
+        res = evaluate_final_status(
+            has_manifest=True,
+            has_original_tests=True,
+            test_state="FAIL",
+            test_metrics={"collected": 10, "passed": 8, "failed": 2},
+            review_details={"approved": True, "review_state": "APPROVED"},
+        )
+        self.assertEqual(res["final_status"], "FAILED")
+        self.assertEqual(res["verification_status"], "FAILED_VERIFICATION")
+        self.assertFalse(res["success"])
+        self.assertEqual(res["db_status"], "failed")
+        self.assertIn("Original test suite failed (2 failed)", res["verification_details"]["checks_failed"])
+
+    def test_status_scenario_10_code_review_rejection(self):
+        """Scenario 10: Code review rejection -> FAILED."""
+        res = evaluate_final_status(
+            has_manifest=True,
+            has_original_tests=True,
+            test_state="PASS",
+            test_metrics={"collected": 4, "passed": 4, "failed": 0},
+            review_details={"approved": False, "review_state": "REJECTED", "rejection_reasons": ["Incomplete edge case handling"]},
+        )
+        self.assertEqual(res["final_status"], "FAILED")
+        self.assertFalse(res["success"])
+        self.assertEqual(res["db_status"], "failed")
+        self.assertTrue(any("Code review rejected" in c for c in res["verification_details"]["checks_failed"]))
+
+    def test_status_scenario_11_critical_execution_failure_not_implemented(self):
+        """Scenario 11: Critical execution failure (NOT_IMPLEMENTED) -> FAILED."""
+        res = evaluate_final_status(
+            has_manifest=True,
+            has_original_tests=True,
+            implementation_status="NOT_IMPLEMENTED",
+            test_state="PASS",
+            review_details={"approved": False, "review_state": "REJECTED"},
+        )
+        self.assertEqual(res["final_status"], "FAILED")
+        self.assertEqual(res["execution_status"], "NOT_COMPLETED")
+        self.assertFalse(res["success"])
+        self.assertEqual(res["db_status"], "failed")
+
+    def test_status_scenario_12_successful_execution_with_incomplete_verification(self):
+        """Scenario 12: Successful execution with zero verification performed -> FAILED."""
+        res = evaluate_final_status(
+            has_manifest=True,
+            has_original_tests=False,
+            has_generated_tests=False,
+            test_state="NO_TESTS",
+            alternative_verification=None,
+            review_details={"approved": True, "review_state": "APPROVED"},
+        )
+        self.assertEqual(res["final_status"], "FAILED")
+        self.assertEqual(res["verification_status"], "UNVERIFIED")
+        self.assertFalse(res["success"])
+        self.assertEqual(res["db_status"], "failed")
+
+    def test_status_scenario_13_conflicting_status_signals_from_agents(self):
+        """Scenario 13: Conflicting status signals from agents -> Evaluator enforces ground truth."""
+        # Case A: Agent claims 100% success in output, but test suite failed
+        res_fail = evaluate_final_status(
+            has_manifest=True,
+            has_original_tests=True,
+            test_state="FAIL",
+            test_metrics={"collected": 4, "passed": 3, "failed": 1},
+            review_details={"approved": True, "review_state": "APPROVED"},
+            agent_outputs={"coder": "I am 100% done and everything is working perfectly!"},
+        )
+        self.assertEqual(res_fail["final_status"], "FAILED")
+        self.assertEqual(res_fail["verification_status"], "FAILED_VERIFICATION")
+        self.assertFalse(res_fail["success"])
+
+        # Case B: Agent claims tests passed, but code reviewer rejected
+        res_reject = evaluate_final_status(
+            has_manifest=True,
+            has_original_tests=True,
+            test_state="PASS",
+            test_metrics={"collected": 4, "passed": 4, "failed": 0},
+            review_details={"approved": False, "review_state": "REJECTED", "rejection_reasons": ["Security issue"]},
+            agent_outputs={"coder": "Done", "verifier": "Tests passed"},
+        )
+        self.assertEqual(res_reject["final_status"], "FAILED")
+        self.assertFalse(res_reject["success"])
+
+    def test_status_scenario_14_status_and_notification_serialization(self):
+        """Scenario 14: Correct status, warnings, notification, and details serialization."""
+        res = evaluate_final_status(
+            dependency_status="DEPENDENCIES_READY",
+            dependency_source="inferred",
+            has_manifest=False,
+            has_original_tests=False,
+            has_generated_tests=True,
+            test_state="PASS",
+            test_metrics={"collected": 3, "passed": 3, "failed": 0},
+            review_details={"approved": True, "review_state": "APPROVED"},
+            inferred_packages=["fastapi", "pydantic"],
+            ambiguous_imports=["local_helper_mod"],
+        )
+        # Verify JSON serializability
+        serialized = json.dumps(res, indent=2)
+        deserialized = json.loads(serialized)
+        self.assertEqual(deserialized["final_status"], "SUCCESS_WITH_WARNINGS")
+        self.assertEqual(deserialized["execution_status"], "COMPLETED")
+        self.assertEqual(deserialized["verification_status"], "PARTIAL_VERIFICATION")
+        self.assertEqual(deserialized["repository_health"], "INCOMPLETE_INFRASTRUCTURE")
+        self.assertTrue(deserialized["success"])
+        self.assertEqual(deserialized["db_status"], "success_with_warnings")
+        self.assertIsInstance(deserialized["warnings"], list)
+        self.assertGreater(len(deserialized["warnings"]), 0)
+        self.assertIsInstance(deserialized["notification"], str)
+        self.assertIn("verification_details", deserialized)
+        self.assertIn("checks_passed", deserialized["verification_details"])
+        self.assertIn("checks_failed", deserialized["verification_details"])
+        self.assertIn("checks_skipped", deserialized["verification_details"])
 
 
 if __name__ == "__main__":

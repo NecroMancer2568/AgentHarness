@@ -111,7 +111,8 @@ class BenchmarkExecutionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result["summary"]["successful_samples"], 4)
             self.assertEqual(result["summary"]["success_rate_percent"], 100.0)
             self.assertTrue(all(sample["test_passed"] and sample["review_approved"] for sample in result["results"]))
-            self.assertTrue(all(db.get_run(sample["run_id"])["status"] == "succeeded" for sample in result["results"]))
+            self.assertTrue(all(sample["success"] for sample in result["results"]))
+            self.assertTrue(all(db.get_run(sample["run_id"])["status"] in {"succeeded", "success_with_warnings"} for sample in result["results"]))
 
 
 if __name__ == "__main__":

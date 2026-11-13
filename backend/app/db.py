@@ -105,8 +105,8 @@ class Database:
               AVG(CASE WHEN duration_ms IS NOT NULL THEN duration_ms END) avg_duration_ms,
               SUM(total_tokens) total_tokens, SUM(llm_calls) llm_calls,
               SUM(prompt_tokens) prompt_tokens, SUM(completion_tokens) completion_tokens
-              FROM runs WHERE status IN ('succeeded','failed')""").fetchone()
-            recent = c.execute("SELECT duration_ms FROM runs WHERE status IN ('succeeded','failed') AND duration_ms IS NOT NULL ORDER BY duration_ms").fetchall()
+              FROM runs WHERE status IN ('succeeded','failed','success_with_warnings')""").fetchone()
+            recent = c.execute("SELECT duration_ms FROM runs WHERE status IN ('succeeded','failed','success_with_warnings') AND duration_ms IS NOT NULL ORDER BY duration_ms").fetchall()
         values = dict(row)
         durations = [r[0] for r in recent]
         p95 = durations[min(len(durations)-1, int((len(durations)-1)*0.95))] if durations else None

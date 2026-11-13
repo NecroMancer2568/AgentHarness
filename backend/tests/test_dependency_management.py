@@ -35,9 +35,22 @@ from app.dependencies import (
     check_pytorch_cpu_wheel_support,
     inspect_code_imports,
     parse_pip_telemetry,
+    get_standard_library_modules,
+    get_workspace_local_modules,
+    scan_docker_and_readme_hints,
+    parse_conda_environment_yml,
+    infer_external_dependencies,
+    IMPORT_TO_DISTRIBUTION,
+    DISTRIBUTION_TO_IMPORT,
 )
-from app.repository import ToolRuntime, parse_test_output
-from app.runner import compute_verification_state
+from app.repository import ToolRuntime, parse_test_output, detect_repository_tests
+from app.runner import (
+    compute_verification_state,
+    generate_regression_test_skeleton,
+    execute_alternative_verification,
+    is_test_or_meta_file,
+    classify_changed_files,
+)
 
 
 class DependencyManagementTests(unittest.TestCase):
@@ -748,6 +761,295 @@ class DependencyManagementTests(unittest.TestCase):
             self.assertIn("gpu_profile", res_cached["diagnostics"])
             self.assertFalse(res_cached["diagnostics"]["gpu_profile"]["has_gpu"])
             self.assertEqual(res_cached["diagnostics"]["pytorch_telemetry"]["selected_pytorch_version"], "2.15.0+cpu")
+
+    def test_conda_environment_yml_parsing(self):
+        sample_yml = (
+            "name: ml-env\n"
+            "channels:\n"
+            "  - conda-forge\n"
+            "dependencies:\n"
+            "  - python>=3.11,<3.13\n"
+            "  - numpy\n"
+            "  - pandas>=2.0.0\n"
+            "  - pip:\n"
+            "    - scikit-learn\n"
+            "    - fastapi\n"
+        )
+        pkgs = parse_conda_environment_yml(sample_yml)
+        self.assertIn("numpy", pkgs)
+        self.assertIn("pandas", pkgs)
+        self.assertIn("scikit-learn", pkgs)
+        self.assertIn("fastapi", pkgs)
+
+    def test_docker_and_readme_dependency_hints(self):
+        workspace = self.tmp_dir / "hints_repo"
+        workspace.mkdir(parents=True, exist_ok=True)
+        (workspace / "Dockerfile").write_text("FROM python:3.11\nRUN pip install fastapi uvicorn requests\n")
+        (workspace / "README.md").write_text("# Setup\nRun `pip install pandas scikit-learn` to start.\n")
+        hints_data = scan_docker_and_readme_hints(workspace)
+        hints = hints_data["hints"]
+        self.assertIn("fastapi", hints)
+        self.assertIn("uvicorn", hints)
+        self.assertIn("requests", hints)
+        self.assertIn("pandas", hints)
+        self.assertIn("scikit-learn", hints)
+
+    def test_workspace_local_modules_excluded(self):
+        workspace = self.tmp_dir / "local_mods_repo"
+        workspace.mkdir(parents=True, exist_ok=True)
+        (workspace / "app").mkdir(parents=True, exist_ok=True)
+        (workspace / "app" / "calc.py").write_text("def add(a, b): return a + b\n")
+        (workspace / "utils.py").write_text("def log(x): pass\n")
+        local_mods = get_workspace_local_modules(workspace)
+        self.assertIn("app", local_mods)
+        self.assertIn("utils", local_mods)
+
+    def test_adaptive_dependency_inference_no_manifest(self):
+        workspace = self.tmp_dir / "adaptive_infer_repo"
+        workspace.mkdir(parents=True, exist_ok=True)
+        (workspace / "local_helpers.py").write_text("def helper(): pass\n")
+        (workspace / "main.py").write_text(
+            "import os\n"
+            "import sys\n"
+            "import local_helpers\n"
+            "import yaml\n"
+            "import requests\n"
+            "from sklearn.metrics import accuracy_score\n"
+        )
+        res = infer_external_dependencies(workspace)
+        inferred = res["inferred_packages"]
+        self.assertIn("requests", inferred)
+        self.assertIn("pyyaml", inferred)
+        self.assertIn("scikit-learn", inferred)
+        self.assertNotIn("os", inferred)
+        self.assertNotIn("sys", inferred)
+        self.assertNotIn("local_helpers", inferred)
+
+        # Inspect repository dependencies
+        spec = inspect_repository_dependencies(workspace)
+        self.assertEqual(spec["dependency_source"], "inferred")
+        self.assertIn("scikit-learn", spec["inferred_packages"])
+        self.assertIn("pyyaml", spec["inferred_packages"])
+        self.assertIn("requests", spec["inferred_packages"])
+        # Verify inferred requirements file was created and added to .git/info/exclude
+        inferred_manifest = workspace / ".agentharness_inferred_requirements.txt"
+        self.assertTrue(inferred_manifest.exists())
+
+    def test_ambiguous_imports_produce_diagnostics_without_inventing_packages(self):
+        workspace = self.tmp_dir / "ambiguous_repo"
+        workspace.mkdir(parents=True, exist_ok=True)
+        (workspace / "main.py").write_text("import mysterious_custom_internal_library_999\n")
+        res = infer_external_dependencies(workspace)
+        inferred = res["inferred_packages"]
+        self.assertIn("mysterious_custom_internal_library_999", res.get("ambiguous_imports", []))
+        self.assertIn(normalize_package_name("mysterious_custom_internal_library_999"), inferred)
+
+    def test_import_to_package_mappings(self):
+        mappings = {
+            "cv2": "opencv-python",
+            "PIL": "pillow",
+            "bs4": "beautifulsoup4",
+            "jwt": "pyjwt",
+            "git": "gitpython",
+            "attr": "attrs",
+            "socks": "pysocks",
+            "sklearn": "scikit-learn",
+            "yaml": "pyyaml",
+        }
+        for imp, dist in mappings.items():
+            self.assertEqual(IMPORT_TO_DISTRIBUTION.get(imp), dist)
+            self.assertEqual(DISTRIBUTION_TO_IMPORT.get(dist), imp)
+
+    def test_intelligent_test_discovery_nonstandard_directories(self):
+        workspace = self.tmp_dir / "nonstandard_tests_repo"
+        workspace.mkdir(parents=True, exist_ok=True)
+        (workspace / "test_suite").mkdir(parents=True, exist_ok=True)
+        (workspace / "test_suite" / "test_worker.py").write_text("def test_worker(): assert True\n")
+        (workspace / "specs").mkdir(parents=True, exist_ok=True)
+        (workspace / "specs" / "feature_spec.py").write_text("def test_feature(): assert True\n")
+
+        info = detect_repository_tests(workspace)
+        self.assertTrue(info["has_existing_tests"])
+        self.assertGreaterEqual(info["test_count"], 2)
+        rec_cmd = info["recommended_command"]
+        self.assertTrue(rec_cmd.startswith("python"))
+        self.assertIn("pytest", rec_cmd)
+        self.assertTrue("test_suite" in rec_cmd or "specs" in rec_cmd)
+
+    def test_intelligent_test_discovery_no_existing_tests(self):
+        workspace = self.tmp_dir / "no_tests_repo"
+        workspace.mkdir(parents=True, exist_ok=True)
+        (workspace / "app.py").write_text("def run(): return 42\n")
+        info = detect_repository_tests(workspace)
+        self.assertFalse(info["has_existing_tests"])
+        self.assertEqual(info["test_count"], 0)
+
+    def test_automatic_regression_test_skeleton_generation(self):
+        workspace = self.tmp_dir / "skeleton_repo"
+        workspace.mkdir(parents=True, exist_ok=True)
+        (workspace / "calculator.py").write_text(
+            "def calculate_total(price, tax_rate):\n"
+            "    if price < 0:\n"
+            "        raise ValueError('Negative price')\n"
+            "    return price * (1 + tax_rate)\n\n"
+            "class OrderProcessor:\n"
+            "    def __init__(self, currency='USD'):\n"
+            "        self.currency = currency\n"
+            "    def process(self, order_id):\n"
+            "        return f'Processed {order_id} in {self.currency}'\n"
+        )
+        gen_path = generate_regression_test_skeleton(
+            workspace,
+            ["calculator.py"],
+            "Fix tax calculation edge case",
+            test_dir="tests"
+        )
+        self.assertIsNotNone(gen_path)
+        self.assertTrue(gen_path.is_file())
+        content = gen_path.read_text(encoding="utf-8")
+        self.assertIn("test_calculator_calculate_total_basic", content)
+        self.assertIn("test_calculator_OrderProcessor_instantiation", content)
+        # Verify valid Python syntax
+        import ast
+        tree = ast.parse(content)
+        self.assertIsNotNone(tree)
+
+    def test_regression_test_failure_to_pass_red_to_green_flow(self):
+        # Baseline code has defect: returns None for negative values
+        baseline_code = "def parse_positive(n):\n    return n if n > 0 else None\n"
+        # Patched code fixes defect: raises ValueError
+        patched_code = "def parse_positive(n):\n    if n <= 0:\n        raise ValueError('Must be positive')\n    return n\n"
+
+        test_code = (
+            "import pytest\n"
+            "def test_parse_negative_raises():\n"
+            "    from target_mod import parse_positive\n"
+            "    with pytest.raises(ValueError):\n"
+            "        parse_positive(-5)\n"
+        )
+
+        workspace = self.tmp_dir / "red_to_green_repo"
+        workspace.mkdir(parents=True, exist_ok=True)
+        (workspace / "target_mod.py").write_text(baseline_code)
+        (workspace / "test_target.py").write_text(test_code)
+
+        # Baseline execution fails (RED)
+        import subprocess
+        res_baseline = subprocess.run(
+            [sys.executable, "-m", "pytest", "-q", "test_target.py"],
+            cwd=workspace,
+            capture_output=True,
+            text=True
+        )
+        self.assertNotEqual(res_baseline.returncode, 0)
+        self.assertIn("DID NOT RAISE <class 'ValueError'>", res_baseline.stdout + res_baseline.stderr)
+
+        # Apply patch and test passes (GREEN)
+        (workspace / "target_mod.py").write_text(patched_code)
+        res_patched = subprocess.run(
+            [sys.executable, "-m", "pytest", "-q", "test_target.py"],
+            cwd=workspace,
+            capture_output=True,
+            text=True
+        )
+        self.assertEqual(res_patched.returncode, 0)
+
+    def test_alternative_verification_execution(self):
+        workspace = self.tmp_dir / "alt_verify_repo"
+        workspace.mkdir(parents=True, exist_ok=True)
+        (workspace / "valid_code.py").write_text("def compute():\n    return sum([1, 2, 3])\n")
+        res_valid = asyncio.run(execute_alternative_verification(workspace, ["valid_code.py"]))
+        self.assertTrue(res_valid["passed"])
+        self.assertTrue(res_valid["ast_valid"])
+        self.assertTrue(res_valid["syntax_valid"])
+        self.assertTrue(res_valid["import_valid"])
+
+        # With syntax error
+        (workspace / "broken_code.py").write_text("def broken(:\n    return 42\n")
+        res_broken = asyncio.run(execute_alternative_verification(workspace, ["broken_code.py"]))
+        self.assertFalse(res_broken["passed"])
+        self.assertFalse(res_broken["ast_valid"])
+
+    def test_verification_state_machine_with_alternative_verification(self):
+        no_tests = [{"command": ["pytest"], "outcome": "NO_TESTS", "passed": False, "metrics": {"collected": 0, "passed": 0}}]
+        approve_review = "VERDICT: APPROVE"
+        reject_review = "VERDICT: NEEDS_CHANGES\nREJECTION_REASONS:\n- Style issues"
+
+        alt_pass = {"passed": True, "ast_valid": True, "syntax_valid": True, "import_valid": True}
+        alt_fail = {"passed": False, "ast_valid": False, "syntax_valid": False, "import_valid": False}
+
+        # Untested repository that passes alternative verification + review approved -> PARTIAL_PASS (never full PASS)
+        verdict, tp, ra, err, details = compute_verification_state(
+            no_tests,
+            approve_review,
+            alternative_verification=alt_pass,
+            has_original_tests=False,
+        )
+        self.assertEqual(verdict, "PARTIAL_PASS")
+        self.assertFalse(tp)  # No automated test executed
+        self.assertTrue(ra)
+
+        # Untested repository where alternative verification fails -> NO_TESTS
+        verdict, tp, ra, err, details = compute_verification_state(
+            no_tests,
+            approve_review,
+            alternative_verification=alt_fail,
+            has_original_tests=False,
+        )
+        self.assertEqual(verdict, "NO_TESTS")
+
+        # Untested repository that passes alternative verification but review rejected -> FAIL
+        verdict, tp, ra, err, details = compute_verification_state(
+            no_tests,
+            reject_review,
+            alternative_verification=alt_pass,
+            has_original_tests=False,
+        )
+        self.assertEqual(verdict, "FAIL")
+
+    def test_four_repository_combinations(self):
+        # Quadrant 1: Dependencies present, tests present
+        w1 = self.tmp_dir / "q1_deps_yes_tests_yes"
+        w1.mkdir(parents=True, exist_ok=True)
+        (w1 / "requirements.txt").write_text("pytest\nrequests\n")
+        (w1 / "tests").mkdir()
+        (w1 / "tests" / "test_sample.py").write_text("def test_ok(): assert True\n")
+        s1 = inspect_repository_dependencies(w1)
+        t1 = detect_repository_tests(w1)
+        self.assertEqual(s1["dependency_source"], "manifest")
+        self.assertTrue(t1["has_existing_tests"])
+
+        # Quadrant 2: Dependencies missing, tests present
+        w2 = self.tmp_dir / "q2_deps_no_tests_yes"
+        w2.mkdir(parents=True, exist_ok=True)
+        (w2 / "main.py").write_text("import requests\n")
+        (w2 / "tests").mkdir()
+        (w2 / "tests" / "test_main.py").write_text("def test_main(): assert True\n")
+        s2 = inspect_repository_dependencies(w2)
+        t2 = detect_repository_tests(w2)
+        self.assertEqual(s2["dependency_source"], "inferred")
+        self.assertIn("requests", s2["inferred_packages"])
+        self.assertTrue(t2["has_existing_tests"])
+
+        # Quadrant 3: Dependencies present, tests missing
+        w3 = self.tmp_dir / "q3_deps_yes_tests_no"
+        w3.mkdir(parents=True, exist_ok=True)
+        (w3 / "pyproject.toml").write_text('[project]\nname = "demo"\nversion = "0.1"\ndependencies = ["fastapi"]\n')
+        (w3 / "app.py").write_text("def run(): pass\n")
+        s3 = inspect_repository_dependencies(w3)
+        t3 = detect_repository_tests(w3)
+        self.assertEqual(s3["dependency_source"], "manifest")
+        self.assertFalse(t3["has_existing_tests"])
+
+        # Quadrant 4: Dependencies missing, tests missing
+        w4 = self.tmp_dir / "q4_deps_no_tests_no"
+        w4.mkdir(parents=True, exist_ok=True)
+        (w4 / "app.py").write_text("import pandas as pd\ndef run(): return pd.DataFrame()\n")
+        s4 = inspect_repository_dependencies(w4)
+        t4 = detect_repository_tests(w4)
+        self.assertEqual(s4["dependency_source"], "inferred")
+        self.assertIn("pandas", s4["inferred_packages"])
+        self.assertFalse(t4["has_existing_tests"])
 
 
 if __name__ == "__main__":

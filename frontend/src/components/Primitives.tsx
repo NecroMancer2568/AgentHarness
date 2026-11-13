@@ -1,5 +1,5 @@
 import { ReactNode } from 'react'
-import { ArrowUpRight, CheckCircle2, AlertCircle, Clock3, Loader2, TerminalSquare, XCircle } from 'lucide-react'
+import { ArrowUpRight, CheckCircle2, AlertCircle, AlertTriangle, Clock3, Loader2, TerminalSquare, XCircle } from 'lucide-react'
 
 export function PageHeader({
   eyebrow,
@@ -47,8 +47,10 @@ export function StatCard({
 export function StatusPill({ status }: { status: string }) {
   const s = status.toLowerCase()
   const Icon =
-    s === 'succeeded' || s === 'pass' || s === 'approved'
+    s === 'succeeded' || s === 'pass' || s === 'approved' || s === 'success'
       ? CheckCircle2
+      : s === 'success_with_warnings' || s === 'partial_pass' || s === 'partial'
+      ? AlertTriangle
       : s === 'failed' || s === 'fail' || s === 'rejected'
       ? XCircle
       : s === 'running'
@@ -59,7 +61,7 @@ export function StatusPill({ status }: { status: string }) {
   return (
     <span className={`pl ${s}`}>
       <Icon size={13} className={s === 'running' ? 'spin' : ''} />
-      {status.toUpperCase()}
+      {status.replace(/_/g, ' ').toUpperCase()}
     </span>
   )
 }

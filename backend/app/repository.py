@@ -712,29 +712,142 @@ class ToolRuntime:
         return result
 
     def detect_repository_tests(self) -> dict[str, Any]:
-        """Examine repository workspace to discover testing framework, test files, and conventions."""
+        """
+        Examine repository workspace to discover testing framework, test files,
+        test directories (including nonstandard ones), configurations, and conventions.
+        """
         workspace = self.workspace
         test_files: list[str] = []
-        ignored = {".git", "node_modules", ".venv", "venv", "dist", "build", "__pycache__", ".next"}
+        test_dirs: set[str] = set()
+        ignored = {".git", "node_modules", ".venv", "venv", "dist", "build", "__pycache__", ".next", ".agentharness"}
 
+        # 1. Check configuration files for testpaths or custom test patterns
+        configured_testpaths: list[str] = []
+        config_file_found: str | None = None
+        custom_python_files: list[str] = []
+
+        # pytest.ini
+        pytest_ini = workspace / "pytest.ini"
+        if pytest_ini.is_file():
+            config_file_found = "pytest.ini"
+            try:
+                txt = pytest_ini.read_text(encoding="utf-8", errors="replace")
+                for line in txt.splitlines():
+                    line = line.strip()
+                    if line.startswith("testpaths"):
+                        parts = line.split("=", 1)[1].strip().split()
+                        configured_testpaths.extend(parts)
+                    elif line.startswith("python_files"):
+                        parts = line.split("=", 1)[1].strip().split()
+                        custom_python_files.extend(parts)
+            except Exception:
+                pass
+
+        # pyproject.toml
+        pyproject = workspace / "pyproject.toml"
+        if pyproject.is_file():
+            try:
+                txt = pyproject.read_text(encoding="utf-8", errors="replace")
+                if "[tool.pytest" in txt:
+                    if not config_file_found:
+                        config_file_found = "pyproject.toml"
+                    m_tp = re.search(r"testpaths\s*=\s*\[(.*?)\]", txt, re.S)
+                    if m_tp:
+                        paths = re.findall(r'["\']([^"\']+)["\']', m_tp.group(1))
+                        configured_testpaths.extend(paths)
+                    m_pf = re.search(r"python_files\s*=\s*\[(.*?)\]", txt, re.S)
+                    if m_pf:
+                        pfiles = re.findall(r'["\']([^"\']+)["\']', m_pf.group(1))
+                        custom_python_files.extend(pfiles)
+            except Exception:
+                pass
+
+        # setup.cfg
+        setup_cfg = workspace / "setup.cfg"
+        if setup_cfg.is_file():
+            try:
+                txt = setup_cfg.read_text(encoding="utf-8", errors="replace")
+                if "[tool:pytest]" in txt or "[pytest]" in txt:
+                    if not config_file_found:
+                        config_file_found = "setup.cfg"
+                    for line in txt.splitlines():
+                        line = line.strip()
+                        if line.startswith("testpaths"):
+                            parts = line.split("=", 1)[1].strip().split()
+                            configured_testpaths.extend(parts)
+            except Exception:
+                pass
+
+        # tox.ini
+        tox_ini = workspace / "tox.ini"
+        if tox_ini.is_file():
+            try:
+                txt = tox_ini.read_text(encoding="utf-8", errors="replace")
+                if "[pytest]" in txt and not config_file_found:
+                    config_file_found = "tox.ini"
+            except Exception:
+                pass
+
+        # Common test directory names
+        known_test_dir_names = {
+            "tests", "test", "testing", "spec", "specs", "test_suite", "test_suites",
+            "unit_tests", "integration_tests", "functional_tests", "tests_unit", "tests_integration"
+        }
+
+        # 2. Walk workspace and identify test files and directories
         for p in workspace.rglob("*"):
             if any(part in ignored for part in p.parts):
                 continue
             if p.is_file():
                 lower = p.name.lower()
                 rel = str(p.relative_to(workspace))
-                is_test = (
-                    lower.startswith("test_")
-                    or lower.endswith("_test.py")
-                    or lower.endswith(".test.js")
-                    or lower.endswith(".test.ts")
-                    or lower.endswith(".spec.js")
-                    or lower.endswith(".spec.ts")
-                    or lower.endswith("_test.go")
-                    or ("tests" in p.parts and p.suffix in {".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".rs", ".java", ".c", ".cpp"})
-                )
+                rel_parts = p.relative_to(workspace).parts
+
+                in_test_dir = any(part.lower() in known_test_dir_names for part in rel_parts[:-1])
+
+                is_test = False
+                # Python test patterns
+                if p.suffix == ".py":
+                    is_test = (
+                        lower.startswith("test_")
+                        or lower.endswith("_test.py")
+                        or lower.endswith("_tests.py")
+                        or lower.endswith("_spec.py")
+                        or lower.startswith("test")
+                        or (in_test_dir and (lower.startswith("t_") or lower.endswith("test.py") or "test" in lower))
+                    )
+                # JS / TS test patterns
+                elif p.suffix in {".js", ".ts", ".jsx", ".tsx"}:
+                    is_test = (
+                        lower.endswith(".test.js") or lower.endswith(".test.ts")
+                        or lower.endswith(".test.jsx") or lower.endswith(".test.tsx")
+                        or lower.endswith(".spec.js") or lower.endswith(".spec.ts")
+                        or lower.endswith(".spec.jsx") or lower.endswith(".spec.tsx")
+                        or in_test_dir
+                    )
+                # Go test pattern
+                elif p.suffix == ".go":
+                    is_test = lower.endswith("_test.go")
+                # Rust test pattern
+                elif p.suffix == ".rs":
+                    is_test = in_test_dir or lower.endswith("_test.rs")
+                # Java test pattern
+                elif p.suffix == ".java":
+                    is_test = (
+                        lower.endswith("test.java")
+                        or lower.endswith("tests.java")
+                        or lower.endswith("testcase.java")
+                        or lower.startswith("test")
+                        or in_test_dir
+                    )
+                # C / C++ test pattern
+                elif p.suffix in {".c", ".cpp", ".cc"}:
+                    is_test = in_test_dir or "test" in lower
+
                 if is_test:
                     test_files.append(rel)
+                    if len(rel_parts) > 1:
+                        test_dirs.add(str(Path(*rel_parts[:-1])))
 
         has_python = bool(list(workspace.glob("*.py")) or list(workspace.glob("*/*.py")) or (workspace / "requirements.txt").exists() or (workspace / "pyproject.toml").exists())
         has_js = (workspace / "package.json").exists()
@@ -743,10 +856,25 @@ class ToolRuntime:
         has_java = (workspace / "pom.xml").exists() or (workspace / "build.gradle").exists() or (workspace / "build.gradle.kts").exists()
         has_c = (workspace / "CMakeLists.txt").exists() or (workspace / "Makefile").exists()
 
+        is_nonstandard = False
+        if test_dirs:
+            if not any(d == "tests" or d.startswith("tests/") for d in test_dirs):
+                is_nonstandard = True
+
         if has_python:
             lang = "python"
             framework = "pytest"
-            rec_cmd = f"pytest -q {test_files[0]}" if test_files else "python -m pytest -q"
+
+            if configured_testpaths:
+                rec_cmd = f"python -m pytest -q {' '.join(configured_testpaths)}"
+            elif is_nonstandard and test_dirs:
+                primary_test_dir = sorted(list(test_dirs))[0]
+                rec_cmd = f"python -m pytest -q {primary_test_dir}"
+            elif test_files:
+                rec_cmd = "python -m pytest -q"
+            else:
+                rec_cmd = "python -m pytest -q"
+
         elif has_js:
             lang = "javascript/typescript"
             framework = "npm test"
@@ -776,7 +904,8 @@ class ToolRuntime:
         missing_notes = None
         if not has_tests:
             if lang == "python":
-                missing_notes = "No test files were found. Coding Agent must create tests/test_<feature>.py with reproducible test assertions."
+                target_dir = sorted(list(test_dirs))[0] if test_dirs else "tests"
+                missing_notes = f"No test files were found. Coding Agent must create {target_dir}/test_<feature>.py with reproducible test assertions."
             elif lang == "javascript/typescript":
                 missing_notes = "No test files were found. Coding Agent should create a meaningful test file."
             else:
@@ -786,7 +915,13 @@ class ToolRuntime:
             "detected_language": lang,
             "detected_framework": framework,
             "has_existing_tests": has_tests,
+            "test_count": len(test_files),
             "existing_test_files": sorted(test_files[:50]),
+            "test_directories": sorted(list(test_dirs)),
+            "test_directory": sorted(list(test_dirs))[0] if test_dirs else "tests",
+            "nonstandard_directory": is_nonstandard,
+            "test_config_file": config_file_found,
+            "configured_testpaths": configured_testpaths,
             "recommended_command": rec_cmd,
             "missing_coverage_notes": missing_notes,
         }
@@ -859,15 +994,10 @@ class ToolRuntime:
         return f"Unknown tool: {name}"
 
     def _detect_test_command(self) -> list[str] | None:
-        has_py_test = (
-            (self.workspace / "pytest.ini").exists()
-            or (self.workspace / "pyproject.toml").exists()
-            or list(self.workspace.glob("test_*.py"))
-            or list(self.workspace.glob("*_test.py"))
-            or (self.workspace / "tests").exists()
-        )
-        if has_py_test:
-            return ["python", "-m", "pytest", "-q"]
+        test_info = self.detect_repository_tests()
+        rec_cmd = test_info.get("recommended_command")
+        if rec_cmd and rec_cmd != "auto":
+            return resolve_test_command(rec_cmd, self.workspace) or rec_cmd.split()
 
         pkg = self.workspace / "package.json"
         if pkg.exists():
@@ -1053,3 +1183,9 @@ class ToolRuntime:
 
     def _emit(self, event_type, message, data):
         if self.event_callback: self.event_callback(event_type, message, data)
+
+
+def detect_repository_tests(workspace: Path) -> dict[str, Any]:
+    """Examine repository workspace to discover testing framework, files, dirs, and commands."""
+    runtime = ToolRuntime(workspace, Settings(), "auto")
+    return runtime.detect_repository_tests()

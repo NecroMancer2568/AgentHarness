@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Activity,
+  AlertTriangle,
   ArrowRight,
   Bot,
   CheckCircle2,
@@ -943,6 +944,11 @@ function LiveExecution({
 
   const result = run.result || {}
   const isActive = run.status === 'running' || run.status === 'queued'
+  const warnings = run.warnings || result.warnings || []
+  const notification = run.notification || result.notification
+  const verificationDetails = result.verification_details || {}
+  const checksPassed: string[] = verificationDetails.checks_passed || []
+  const checksSkipped: string[] = verificationDetails.checks_skipped || []
 
   return (
     <>
@@ -994,6 +1000,45 @@ function LiveExecution({
           {run.repository}
         </span>
       </div>
+
+      {(warnings.length > 0 || run.status === 'success_with_warnings') && (
+        <div
+          className="c"
+          style={{
+            border: '1px solid rgba(251, 191, 36, 0.4)',
+            background: 'rgba(251, 191, 36, 0.08)',
+            padding: '16px 22px',
+            marginBottom: 20,
+            borderRadius: 12,
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, color: '#fbbf24', fontWeight: 600, fontSize: 14 }}>
+            <AlertTriangle size={18} />
+            <span>{notification || 'Execution Completed With Warnings'}</span>
+          </div>
+          {warnings.length > 0 && (
+            <ul style={{ margin: '10px 0 0 24px', padding: 0, fontSize: 13, color: 'rgba(255,255,255,0.85)' }}>
+              {warnings.map((w: string, idx: number) => (
+                <li key={idx} style={{ marginBottom: 4 }}>{w}</li>
+              ))}
+            </ul>
+          )}
+          {(checksPassed.length > 0 || checksSkipped.length > 0) && (
+            <div style={{ display: 'flex', gap: 16, marginTop: 12, fontSize: 12, flexWrap: 'wrap' }}>
+              {checksPassed.length > 0 && (
+                <div style={{ color: '#4ade80' }}>
+                  ✓ Passed ({checksPassed.length}): {checksPassed.join(', ')}
+                </div>
+              )}
+              {checksSkipped.length > 0 && (
+                <div style={{ color: 'rgba(255,255,255,0.6)' }}>
+                  ⊘ Skipped ({checksSkipped.length}): {checksSkipped.join(', ')}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="gr c2">
         <div className="c">
@@ -1111,6 +1156,30 @@ function LiveExecution({
 
           <div style={{ marginTop: 24, paddingTop: 18, borderTop: '1px solid rgba(255,255,255,0.12)' }}>
             <h2>Verification Outcomes</h2>
+            {(run.final_status || result.final_status) && (
+              <div className="rw">
+                <span className="lb">Final status</span>
+                <StatusPill status={run.final_status || result.final_status} />
+              </div>
+            )}
+            {(run.execution_status || result.execution_status) && (
+              <div className="rw">
+                <span className="lb">Execution</span>
+                <span className="mono">{run.execution_status || result.execution_status}</span>
+              </div>
+            )}
+            {(run.verification_status || result.verification_status) && (
+              <div className="rw">
+                <span className="lb">Verification</span>
+                <span className="mono">{run.verification_status || result.verification_status}</span>
+              </div>
+            )}
+            {(run.repository_health || result.repository_health) && (
+              <div className="rw">
+                <span className="lb">Repo health</span>
+                <span className="mono">{run.repository_health || result.repository_health}</span>
+              </div>
+            )}
             {result.verification_state && (
               <div className="rw">
                 <span className="lb">State</span>
@@ -1184,6 +1253,7 @@ function RunHistory({
           >
             <option value="all">All statuses</option>
             <option value="succeeded">Succeeded</option>
+            <option value="success_with_warnings">Success with warnings</option>
             <option value="failed">Failed</option>
             <option value="running">Running</option>
             <option value="queued">Queued</option>

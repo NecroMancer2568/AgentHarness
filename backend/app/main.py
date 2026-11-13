@@ -132,7 +132,7 @@ async def stream_events(run_id: str, request: Request, after_id: int = 0):
                 yield f"id: {cursor}\nevent: {event['event_type']}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
                 last_ping = time.monotonic()
             row = db.get_run(run_id)
-            if row and row["status"] in {"succeeded", "failed", "cancelled"} and not events:
+            if row and row["status"] in {"succeeded", "failed", "cancelled", "success_with_warnings"} and not events:
                 yield "event: done\ndata: {}\n\n"
                 break
             # Periodic SSE comment ping every 15s keeps proxies and browsers from timing out
@@ -208,13 +208,42 @@ async def get_public_settings():
       "api_key_configured":bool(settings.openrouter_api_key.strip())}
 
 def _serialize_run(row: dict, detail: bool = False):
-    item = {"id":row["id"], "repository":row["repository"], "task":row["task"], "status":row["status"],
-      "created_at":row["created_at"], "updated_at":row["updated_at"], "duration_ms":row["duration_ms"],
-      "success":None if row["success"] is None else bool(row["success"]), "total_tokens":row["total_tokens"],
-      "prompt_tokens":row["prompt_tokens"], "completion_tokens":row["completion_tokens"], "llm_calls":row["llm_calls"], "error":row["error"]}
+    result_data = json.loads(row["result_json"]) if row.get("result_json") else {}
+    metrics_data = json.loads(row["metrics_json"] or "{}") if row.get("metrics_json") else {}
+
+    final_status = result_data.get("final_status")
+    if not final_status:
+        if row["status"] == "succeeded":
+            final_status = "SUCCESS"
+        elif row["status"] == "success_with_warnings":
+            final_status = "SUCCESS_WITH_WARNINGS"
+        else:
+            final_status = "FAILED"
+
+    item = {
+        "id": row["id"],
+        "repository": row["repository"],
+        "task": row["task"],
+        "status": row["status"],
+        "final_status": final_status,
+        "execution_status": result_data.get("execution_status") or metrics_data.get("execution_status"),
+        "verification_status": result_data.get("verification_status") or metrics_data.get("verification_status"),
+        "repository_health": result_data.get("repository_health") or metrics_data.get("repository_health"),
+        "warnings": result_data.get("warnings", metrics_data.get("warnings", [])),
+        "notification": result_data.get("notification") or metrics_data.get("notification"),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+        "duration_ms": row["duration_ms"],
+        "success": None if row["success"] is None else bool(row["success"]),
+        "total_tokens": row["total_tokens"],
+        "prompt_tokens": row["prompt_tokens"],
+        "completion_tokens": row["completion_tokens"],
+        "llm_calls": row["llm_calls"],
+        "error": row["error"],
+    }
     if detail:
-        item["result"] = json.loads(row["result_json"]) if row.get("result_json") else None
-        item["metrics"] = json.loads(row["metrics_json"] or "{}")
+        item["result"] = result_data if result_data else None
+        item["metrics"] = metrics_data
         item["workspace_path"] = row.get("workspace_path")
         item["events"] = db.get_events(row["id"])
     return item

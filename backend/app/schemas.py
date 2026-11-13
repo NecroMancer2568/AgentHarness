@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Any, Literal
 from pydantic import BaseModel, Field
 
-RunStatus = Literal["queued", "running", "succeeded", "failed", "cancelled"]
+RunStatus = Literal["queued", "running", "succeeded", "failed", "cancelled", "success_with_warnings"]
 
 class RunCreate(BaseModel):
     repository: str = Field(min_length=1, max_length=200)
@@ -27,6 +27,12 @@ class RunSummary(BaseModel):
     repository: str
     task: str
     status: RunStatus
+    final_status: str | None = None
+    execution_status: str | None = None
+    verification_status: str | None = None
+    repository_health: str | None = None
+    warnings: list[str] = Field(default_factory=list)
+    notification: str | None = None
     created_at: str
     updated_at: str
     duration_ms: int | None = None
