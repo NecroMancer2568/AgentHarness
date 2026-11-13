@@ -31,6 +31,10 @@ from app.dependencies import (
     get_system_resource_info,
     verify_environment_imports,
     classify_dependency_error,
+    detect_nvidia_gpu,
+    check_pytorch_cpu_wheel_support,
+    inspect_code_imports,
+    parse_pip_telemetry,
 )
 from app.repository import ToolRuntime, parse_test_output
 from app.runner import compute_verification_state
@@ -427,7 +431,7 @@ class DependencyManagementTests(unittest.TestCase):
             self.assertIn("https://download.pytorch.org/whl/cpu", pip_call)
             self.assertIn("-r", pip_call)
 
-        # On aarch64: whl/cpu must NOT be added (aarch64 wheels are on PyPI)
+        # On aarch64 CPU: whl/cpu index MUST be added to prevent multi-GB CUDA dependency explosion
         captured_cmds.clear()
         with patch("app.dependencies.run_process_safely", side_effect=capture_proc), \
              patch("platform.machine", return_value="aarch64"):
@@ -435,7 +439,17 @@ class DependencyManagementTests(unittest.TestCase):
             self.assertEqual(res_arm["status"], "DEPENDENCIES_READY")
 
             pip_call_arm = next(c for c in captured_cmds if "install" in c)
-            self.assertNotIn("https://download.pytorch.org/whl/cpu", pip_call_arm)
+            self.assertIn("https://download.pytorch.org/whl/cpu", pip_call_arm)
+
+        # On host with NVIDIA GPU detected: whl/cpu index must NOT be added (allow CUDA resolution)
+        captured_cmds.clear()
+        with patch("app.dependencies.run_process_safely", side_effect=capture_proc), \
+             patch("app.dependencies.detect_nvidia_gpu", return_value={"available": True, "devices": ["NVIDIA A100"], "reason": "GPU detected"}):
+            res_gpu = asyncio.run(prepare_environment(workspace, self.settings, "ml_repo_gpu"))
+            self.assertEqual(res_gpu["status"], "DEPENDENCIES_READY")
+
+            pip_call_gpu = next(c for c in captured_cmds if "install" in c)
+            self.assertNotIn("https://download.pytorch.org/whl/cpu", pip_call_gpu)
 
     def test_classify_dependency_error_differentiation(self):
         # 1. Timeout
@@ -569,6 +583,171 @@ class DependencyManagementTests(unittest.TestCase):
             self.assertFalse(approved)
             self.assertEqual(details["test_state"], "BLOCKED")
             self.assertEqual(details["regression_status"], "BLOCKED")
+
+    def test_detect_nvidia_gpu_when_smi_missing(self):
+        with patch("shutil.which", return_value=None), \
+             patch("pathlib.Path.exists", return_value=False):
+            info = detect_nvidia_gpu()
+            self.assertFalse(info["available"])
+            self.assertIn("not found", info["reason"])
+            self.assertEqual(info["devices"], [])
+
+    def test_detect_nvidia_gpu_when_smi_reports_gpu(self):
+        fake_csv = MagicMock(
+            returncode=0,
+            stdout="Tesla T4, 535.129.03\n",
+            stderr="",
+        )
+        fake_full = MagicMock(
+            returncode=0,
+            stdout="NVIDIA-SMI 535.129.03   Driver Version: 535.129.03   CUDA Version: 12.2\n",
+            stderr="",
+        )
+        def mock_subp(cmd, *args, **kwargs):
+            if any("--query-gpu" in arg for arg in cmd):
+                return fake_csv
+            return fake_full
+
+        with patch("shutil.which", return_value="/usr/bin/nvidia-smi"), \
+             patch("subprocess.run", side_effect=mock_subp):
+            info = detect_nvidia_gpu()
+            self.assertTrue(info["available"])
+            self.assertEqual(info["devices"], ["Tesla T4"])
+            self.assertEqual(info["driver_version"], "535.129.03")
+            self.assertEqual(info["cuda_version"], "12.2")
+
+    def test_detect_nvidia_gpu_when_visible_devices_void(self):
+        with patch.dict(os.environ, {"NVIDIA_VISIBLE_DEVICES": "void"}):
+            info = detect_nvidia_gpu()
+            self.assertFalse(info["available"])
+            self.assertIn("NVIDIA_VISIBLE_DEVICES", info["reason"])
+
+    def test_check_pytorch_cpu_wheel_support(self):
+        # Linux aarch64 Python 3.13: supported with CPU index
+        res_arm = check_pytorch_cpu_wheel_support("3.13.1", "linux", "aarch64")
+        self.assertTrue(res_arm["supported"])
+        self.assertEqual(res_arm["recommended_index"], "https://download.pytorch.org/whl/cpu")
+
+        # Linux x86_64 Python 3.13: supported with CPU index
+        res_x86 = check_pytorch_cpu_wheel_support("3.13.0", "linux", "x86_64")
+        self.assertTrue(res_x86["supported"])
+        self.assertEqual(res_x86["recommended_index"], "https://download.pytorch.org/whl/cpu")
+
+        # macOS: supported via default wheels
+        res_mac = check_pytorch_cpu_wheel_support("3.13.0", "darwin", "arm64")
+        self.assertTrue(res_mac["supported"])
+        self.assertIsNone(res_mac["recommended_index"])
+
+    def test_parse_pip_telemetry_detects_cuda_explosion(self):
+        sample_log = (
+            "Collecting torch\n"
+            "  Downloading torch-2.15.0-cp313-cp313-manylinux_2_28_aarch64.whl (483.7 MB)\n"
+            "Collecting nvidia-cudnn-cu13\n"
+            "  Downloading nvidia_cudnn_cu13-9.26.0.51-py3-none-manylinux_2_27_aarch64.whl (595.3 MB)\n"
+            "  27.3/595.3 MB 36.9 kB/s eta 4:18:22\n"
+        )
+        telemetry = parse_pip_telemetry(sample_log)
+        self.assertEqual(telemetry["selected_pytorch_version"], "2.15.0")
+        self.assertEqual(telemetry["selected_wheel_filename"], "torch-2.15.0-cp313-cp313-manylinux_2_28_aarch64.whl")
+        self.assertEqual(telemetry["pytorch_wheel_size_mb"], 483.7)
+        self.assertIn("nvidia-cudnn-cu13", telemetry["transitive_nvidia_dependencies"])
+        self.assertIn("36.9 kB/s", telemetry["recorded_download_speeds"])
+
+    def test_parse_pip_telemetry_detects_cpu_wheel(self):
+        sample_log = (
+            "Collecting torch\n"
+            "  Downloading torch-2.15.0+cpu-cp313-cp313-manylinux_2_28_aarch64.whl (170.7 MB)\n"
+            "  170.7/170.7 MB 18.5 MB/s eta 0:00:00\n"
+            "Installing collected packages: torch\n"
+        )
+        telemetry = parse_pip_telemetry(sample_log)
+        self.assertEqual(telemetry["selected_pytorch_version"], "2.15.0+cpu")
+        self.assertEqual(telemetry["selected_wheel_filename"], "torch-2.15.0+cpu-cp313-cp313-manylinux_2_28_aarch64.whl")
+        self.assertEqual(telemetry["pytorch_wheel_size_mb"], 170.7)
+        self.assertEqual(telemetry["transitive_nvidia_dependencies"], [])
+        self.assertIn("18.5 MB/s", telemetry["recorded_download_speeds"])
+
+    def test_inspect_code_imports(self):
+        workspace = self.tmp_dir / "import_scan_repo"
+        workspace.mkdir(parents=True, exist_ok=True)
+        (workspace / "main.py").write_text("import torch\nimport pandas as pd\nfrom sklearn.metrics import accuracy_score\n")
+        (workspace / "tests").mkdir(parents=True, exist_ok=True)
+        (workspace / "tests" / "test_main.py").write_text("import pytest\nimport torch\n")
+
+        imports = inspect_code_imports(workspace)
+        self.assertIn("torch", imports["production"])
+        self.assertIn("pandas", imports["production"])
+        self.assertIn("sklearn", imports["production"])
+        self.assertIn("pytest", imports["tests"])
+
+    def test_prepare_environment_cpu_skips_gpu_requirements_file(self):
+        workspace = self.tmp_dir / "gpu_req_repo"
+        workspace.mkdir(parents=True, exist_ok=True)
+        (workspace / "requirements.txt").write_text("torch\npandas\n")
+        (workspace / "requirements-gpu.txt").write_text("torch\nnvidia-cuda-runtime-cu12\n")
+
+        captured_cmds = []
+        async def capture_proc(cmd, cwd, timeout, env=None):
+            captured_cmds.append(cmd)
+            if "-m" in cmd and "venv" in cmd:
+                venv_dir = Path(cmd[3])
+                (venv_dir / "bin").mkdir(parents=True, exist_ok=True)
+                (venv_dir / "bin" / "python").write_text("#!/bin/sh\nexit 0\n")
+                (venv_dir / "bin" / "python").chmod(0o755)
+                (venv_dir / "bin" / "pytest").write_text("#!/bin/sh\nexit 0\n")
+                (venv_dir / "bin" / "pytest").chmod(0o755)
+                return 0, "", "", False
+            return 0, "Successfully installed", "", False
+
+        with patch("app.dependencies.run_process_safely", side_effect=capture_proc), \
+             patch("app.dependencies.detect_nvidia_gpu", return_value={"available": False, "devices": [], "reason": "No GPU"}):
+            res = asyncio.run(prepare_environment(workspace, self.settings, "gpu_req_repo"))
+            self.assertEqual(res["status"], "DEPENDENCIES_READY")
+
+            pip_call = next(c for c in captured_cmds if "install" in c)
+            req_args = [pip_call[i+1] for i, arg in enumerate(pip_call) if arg == "-r"]
+            self.assertTrue(any("requirements.txt" in p for p in req_args))
+            self.assertFalse(any("requirements-gpu.txt" in p for p in req_args))
+
+    def test_prepare_environment_diagnostics_records_gpu_profile_and_telemetry(self):
+        workspace = self.tmp_dir / "telemetry_repo"
+        workspace.mkdir(parents=True, exist_ok=True)
+        (workspace / "requirements.txt").write_text("torch\n")
+
+        captured_cmds = []
+        async def capture_proc(cmd, cwd, timeout, env=None):
+            captured_cmds.append(cmd)
+            if "-m" in cmd and "venv" in cmd:
+                venv_dir = Path(cmd[3])
+                (venv_dir / "bin").mkdir(parents=True, exist_ok=True)
+                (venv_dir / "bin" / "python").write_text("#!/bin/sh\nexit 0\n")
+                (venv_dir / "bin" / "python").chmod(0o755)
+                (venv_dir / "bin" / "pytest").write_text("#!/bin/sh\nexit 0\n")
+                (venv_dir / "bin" / "pytest").chmod(0o755)
+                return 0, "", "", False
+            if any("print('ready')" in str(arg) for arg in cmd):
+                return 0, "ready\n", "", False
+            sample_pip_output = (
+                "Downloading torch-2.15.0+cpu-cp313-cp313-manylinux_2_28_aarch64.whl (170.7 MB)\n"
+                "Successfully installed torch-2.15.0+cpu\n"
+            )
+            return 0, sample_pip_output, "", False
+
+        with patch("app.dependencies.run_process_safely", side_effect=capture_proc), \
+             patch("app.dependencies.detect_nvidia_gpu", return_value={"available": False, "devices": [], "reason": "No GPU"}):
+            res = asyncio.run(prepare_environment(workspace, self.settings, "telemetry_repo"))
+            self.assertEqual(res["status"], "DEPENDENCIES_READY")
+            self.assertIn("gpu_profile", res["diagnostics"])
+            self.assertFalse(res["diagnostics"]["gpu_profile"]["has_gpu"])
+            self.assertIn("pytorch_telemetry", res["diagnostics"])
+            self.assertEqual(res["diagnostics"]["pytorch_telemetry"]["selected_pytorch_version"], "2.15.0+cpu")
+
+            # Check cache hit returns the saved telemetry
+            res_cached = asyncio.run(prepare_environment(workspace, self.settings, "telemetry_repo"))
+            self.assertTrue(res_cached["cached"])
+            self.assertIn("gpu_profile", res_cached["diagnostics"])
+            self.assertFalse(res_cached["diagnostics"]["gpu_profile"]["has_gpu"])
+            self.assertEqual(res_cached["diagnostics"]["pytorch_telemetry"]["selected_pytorch_version"], "2.15.0+cpu")
 
 
 if __name__ == "__main__":

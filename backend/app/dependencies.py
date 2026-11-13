@@ -1,6 +1,7 @@
 """Repository-aware dependency manifest inspection, virtual environment isolation, and caching."""
 from __future__ import annotations
 
+import ast
 import asyncio
 import hashlib
 import json
@@ -89,6 +90,232 @@ def get_system_resource_info() -> dict[str, Any]:
     except (ValueError, AttributeError, OSError):
         pass
     return info
+
+
+def detect_nvidia_gpu() -> dict[str, Any]:
+    """
+    Accurately detect whether a usable NVIDIA GPU device and runtime are present.
+    Does not infer GPU presence solely from installed Python packages.
+    """
+    visible = os.environ.get("NVIDIA_VISIBLE_DEVICES", "").strip().lower()
+    if visible in {"none", "void"}:
+        return {
+            "available": False,
+            "reason": "NVIDIA_VISIBLE_DEVICES is set to none/void",
+            "devices": [],
+            "driver_version": None,
+            "cuda_version": None,
+        }
+
+    smi_path = shutil.which("nvidia-smi")
+    if not smi_path:
+        return {
+            "available": False,
+            "reason": "nvidia-smi binary not found in PATH",
+            "devices": [],
+            "driver_version": None,
+            "cuda_version": None,
+        }
+
+    try:
+        res = subprocess.run(
+            [smi_path, "--query-gpu=name,driver_version", "--format=csv,noheader"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        if res.returncode == 0 and res.stdout.strip():
+            lines = [l.strip() for l in res.stdout.strip().splitlines() if l.strip()]
+            devices = []
+            driver_ver = None
+            for line in lines:
+                parts = [p.strip() for p in line.split(",")]
+                devices.append(parts[0])
+                if len(parts) > 1 and not driver_ver:
+                    driver_ver = parts[1]
+            if devices:
+                cuda_ver = None
+                try:
+                    smi_gen = subprocess.run([smi_path], capture_output=True, text=True, timeout=2)
+                    m = re.search(r"CUDA Version:\s*(\d+\.\d+)", smi_gen.stdout)
+                    if m:
+                        cuda_ver = m.group(1)
+                except Exception:
+                    pass
+
+                return {
+                    "available": True,
+                    "reason": f"nvidia-smi detected {len(devices)} active GPU(s)",
+                    "devices": devices,
+                    "driver_version": driver_ver,
+                    "cuda_version": cuda_ver,
+                }
+    except Exception as exc:
+        return {
+            "available": False,
+            "reason": f"nvidia-smi execution error: {exc}",
+            "devices": [],
+            "driver_version": None,
+            "cuda_version": None,
+        }
+
+    dev_nodes = ["/dev/nvidia0", "/dev/nvidiactl"]
+    has_dev = any(Path(p).exists() for p in dev_nodes)
+    if not has_dev:
+        return {
+            "available": False,
+            "reason": "No NVIDIA GPU device nodes found in /dev",
+            "devices": [],
+            "driver_version": None,
+            "cuda_version": None,
+        }
+
+    return {
+        "available": False,
+        "reason": "GPU device nodes present but nvidia-smi failed to communicate with driver",
+        "devices": [],
+        "driver_version": None,
+        "cuda_version": None,
+    }
+
+
+def check_pytorch_cpu_wheel_support(python_version: str, platform_name: str, arch: str) -> dict[str, Any]:
+    """
+    Verify whether official CPU-only PyTorch wheels are available for the target Python, OS, and arch.
+    Returns: {"supported": bool, "recommended_index": str | None, "warning": str | None}
+    """
+    plat = platform_name.lower()
+    norm_arch = arch.lower()
+    py_parts = [int(p) for p in re.findall(r"\d+", python_version)]
+    py_maj, py_min = (py_parts[0], py_parts[1]) if len(py_parts) >= 2 else (3, 13)
+
+    cpu_index = "https://download.pytorch.org/whl/cpu"
+
+    # Python 3.13 requires PyTorch >= 2.6.0
+    if py_maj == 3 and py_min >= 13:
+        if plat.startswith("linux") and norm_arch in {"x86_64", "amd64", "aarch64", "arm64"}:
+            return {
+                "supported": True,
+                "recommended_index": cpu_index,
+                "warning": None,
+                "min_torch_version": "2.6.0",
+            }
+        elif plat.startswith("darwin"):
+            # macOS uses default PyPI CPU/MPS wheels
+            return {
+                "supported": True,
+                "recommended_index": None,
+                "warning": None,
+                "min_torch_version": "2.6.0",
+            }
+        elif plat.startswith("win"):
+            return {
+                "supported": True,
+                "recommended_index": cpu_index,
+                "warning": None,
+                "min_torch_version": "2.6.0",
+            }
+
+    # Python 3.8 - 3.12 has broad PyTorch wheel support
+    if py_maj == 3 and 8 <= py_min <= 12:
+        return {
+            "supported": True,
+            "recommended_index": cpu_index,
+            "warning": None,
+            "min_torch_version": "1.10.0",
+        }
+
+    return {
+        "supported": False,
+        "recommended_index": cpu_index,
+        "warning": f"Python {python_version} on {platform_name}-{arch} may lack official pre-built PyTorch CPU wheels.",
+        "min_torch_version": "2.6.0",
+    }
+
+
+def inspect_code_imports(workspace: Path) -> dict[str, set[str]]:
+    """Scan Python source and test files to determine which modules are actually imported."""
+    prod_imports: set[str] = set()
+    test_imports: set[str] = set()
+
+    for py_file in workspace.rglob("*.py"):
+        try:
+            rel_parts = py_file.relative_to(workspace).parts
+        except ValueError:
+            rel_parts = py_file.parts
+        if any(part.startswith(".") or part in {"site-packages", "__pycache__", "venv", "venvs", "pip_cache"} for part in rel_parts):
+            continue
+        try:
+            tree = ast.parse(py_file.read_text(encoding="utf-8", errors="replace"))
+            is_test = "test" in py_file.name.lower() or any("test" in p.lower() for p in rel_parts[:-1])
+            target_set = test_imports if is_test else prod_imports
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        target_set.add(normalize_package_name(alias.name.split(".")[0]))
+                elif isinstance(node, ast.ImportFrom):
+                    if node.module:
+                        target_set.add(normalize_package_name(node.module.split(".")[0]))
+        except Exception:
+            continue
+
+    return {"production": prod_imports, "tests": test_imports}
+
+
+def parse_pip_telemetry(log: str) -> dict[str, Any]:
+    """
+    Extract PyTorch wheel, sizes, transitive NVIDIA CUDA dependencies,
+    and download telemetry from pip output.
+    """
+    torch_wheel = None
+    torch_version = None
+    torch_size_mb = None
+    nvidia_deps: set[str] = set()
+    speeds: list[str] = []
+
+    # Regex patterns
+    wheel_pat = re.compile(r"Downloading\s+([^\s/]+\.whl)\s*\(([\d\.]+)\s*([kKmMgG][bB])\)")
+    speed_pat = re.compile(r"([\d\.]+\s*(?:kB/s|KB/s|MB/s|GB/s))")
+    collected_pat = re.compile(r"Collecting\s+([a-zA-Z0-9_\-]+)")
+
+    for line in log.splitlines():
+        m_wheel = wheel_pat.search(line)
+        if m_wheel:
+            fname, size_val, unit = m_wheel.group(1), float(m_wheel.group(2)), m_wheel.group(3).upper()
+            size_mb = size_val
+            if unit.startswith("K"):
+                size_mb = round(size_val / 1024, 2)
+            elif unit.startswith("G"):
+                size_mb = round(size_val * 1024, 2)
+
+            if "torch-" in fname:
+                torch_wheel = fname
+                torch_size_mb = size_mb
+                m_ver = re.search(r"torch-([0-9a-zA-Z\.\+\-_]+?)-cp", fname)
+                if m_ver:
+                    torch_version = m_ver.group(1)
+
+            if any(k in fname.lower() for k in ("nvidia", "cuda", "cudnn", "cublas", "cusparse", "cufft", "curand", "cusolver", "nvtx", "triton")):
+                nvidia_deps.add(fname.split("-")[0].replace("_", "-"))
+
+        if any(k in line.lower() for k in ("nvidia", "cuda", "cudnn", "cublas", "cusparse", "cufft", "curand", "cusolver", "nvtx", "triton")):
+            m_col = collected_pat.search(line)
+            if m_col:
+                pkg = m_col.group(1).lower()
+                if any(k in pkg for k in ("nvidia", "cuda", "cudnn", "cublas", "cusparse", "cufft", "curand", "cusolver", "nvtx", "triton")):
+                    nvidia_deps.add(pkg)
+
+        m_speed = speed_pat.findall(line)
+        for s in m_speed:
+            speeds.append(s)
+
+    return {
+        "selected_pytorch_version": torch_version,
+        "selected_wheel_filename": torch_wheel,
+        "pytorch_wheel_size_mb": torch_size_mb,
+        "transitive_nvidia_dependencies": sorted(list(nvidia_deps)),
+        "recorded_download_speeds": speeds[-5:] if speeds else [],
+    }
 
 
 class AsyncFileLock:
@@ -907,6 +1134,11 @@ async def prepare_environment(
     py_parts = [p for p in re.findall(r"\d+", selected_py_ver)]
     py_major_minor = f"{py_parts[0]}.{py_parts[1]}" if len(py_parts) >= 2 else selected_py_ver
 
+    # Detect GPU availability and PyTorch wheel support
+    gpu_info = detect_nvidia_gpu()
+    has_gpu = gpu_info["available"]
+    wheel_check = check_pytorch_cpu_wheel_support(selected_py_ver, plat, arch)
+
     cache_key = build_cache_key(repo_name, manifest_hash, selected_py_ver, plat, arch)
     settings.venvs_root.mkdir(parents=True, exist_ok=True)
     venv_dir = (settings.venvs_root / cache_key).resolve()
@@ -969,6 +1201,14 @@ async def prepare_environment(
                                 "output": "Reused cached environment matching dependency manifest hash.",
                                 "diagnostics": {
                                     "system_resources": get_system_resource_info(),
+                                    "gpu_profile": marker_data.get("gpu_profile") or {
+                                        "has_gpu": has_gpu,
+                                        "devices": gpu_info.get("devices", []),
+                                        "reason": gpu_info.get("reason"),
+                                    },
+                                    "pytorch_telemetry": marker_data.get("pytorch_info", {}).get("pip_telemetry", {}),
+                                    "pytorch_wheel_check": wheel_check,
+                                    "cuda_packages_detected_on_cpu": False,
                                 },
                             }
                 except Exception:
@@ -1051,25 +1291,36 @@ async def prepare_environment(
 
             # Optimize heavyweight ML dependencies: PyTorch CPU wheels for CPU-only environments
             has_torch = any(p in declared_packages for p in ("torch", "torchvision", "torchaudio"))
+            extra_index_used = None
+
             if has_torch and not getattr(settings, "agentharness_pip_extra_index_url", None):
-                has_gpu = False
-                try:
-                    if shutil.which("nvidia-smi"):
-                        r_gpu = subprocess.run(["nvidia-smi"], capture_output=True, timeout=2)
-                        has_gpu = (r_gpu.returncode == 0)
-                except Exception:
-                    has_gpu = False
-                # IMPORTANT: download.pytorch.org/whl/cpu ONLY hosts x86_64 and win_amd64 wheels!
-                # On aarch64 / arm64, PyTorch publishes official pre-built wheels directly on PyPI.
-                # Adding download.pytorch.org/whl/cpu on aarch64 causes pip to stall and query empty indexes.
-                if not has_gpu and arch in {"x86_64", "amd64"}:
-                    base_pip_cmd.extend(["--extra-index-url", "https://download.pytorch.org/whl/cpu"])
+                if not has_gpu:
+                    # Provide official pre-built CPU wheels for CPU-only environments across Linux (x86_64, aarch64), Windows, etc.
+                    # download.pytorch.org/whl/cpu hosts pre-built CPU wheels for both x86_64 and aarch64
+                    # which do not pull multi-gigabyte NVIDIA CUDA runtime packages.
+                    rec_index = wheel_check.get("recommended_index") or "https://download.pytorch.org/whl/cpu"
+                    base_pip_cmd.extend(["--extra-index-url", rec_index])
+                    extra_index_used = rec_index
 
             # Prepare installation command arguments
             install_targets: list[str] = ["pytest"]
             req_file_found = False
 
-            for m in manifests:
+            # If on a CPU-only host, filter out GPU-specific requirement files (e.g. requirements-gpu.txt, requirements-cuda.txt)
+            # if standard or CPU requirement files exist.
+            applicable_manifests = manifests
+            if not has_gpu:
+                has_cpu_or_std = any(
+                    m["type"] == "requirements.txt" and not any(k in m["path"].lower() for k in ("gpu", "cuda"))
+                    for m in manifests
+                )
+                if has_cpu_or_std:
+                    applicable_manifests = [
+                        m for m in manifests
+                        if not (m["type"] == "requirements.txt" and any(k in m["path"].lower() for k in ("gpu", "cuda")))
+                    ]
+
+            for m in applicable_manifests:
                 if m["type"] == "requirements.txt":
                     req_path = (workspace / m["path"]).resolve()
                     if req_path.is_file():
@@ -1099,6 +1350,10 @@ async def prepare_environment(
             se_clean = sanitize_credentials(stderr)
             combined_log = so_clean + ("\n" + se_clean if se_clean else "")
 
+            # Parse pip telemetry from installation log
+            pip_telemetry = parse_pip_telemetry(combined_log)
+            cuda_on_cpu = bool(not has_gpu and pip_telemetry.get("transitive_nvidia_dependencies"))
+
             if timed_out:
                 emit("dependency_install_failed", f"Dependency installation timed out after {timeout_budget}s", {"elapsed_ms": dur})
                 diag_status, diag_reason, diag_suggestion = classify_dependency_error(
@@ -1108,6 +1363,11 @@ async def prepare_environment(
                     timeout_budget=timeout_budget,
                     dur=dur,
                 )
+                if cuda_on_cpu:
+                    diag_suggestion = (
+                        f"Unnecessary NVIDIA CUDA packages were detected in a CPU-only environment ({', '.join(pip_telemetry['transitive_nvidia_dependencies'])}). "
+                        "AgentHarness uses '--extra-index-url https://download.pytorch.org/whl/cpu' to avoid CUDA package explosion."
+                    )
                 diagnostics = {
                     "reason": diag_reason,
                     "failure_code": diag_status,
@@ -1118,6 +1378,10 @@ async def prepare_environment(
                     "failed_command": cmd_str,
                     "declared_packages": declared_packages,
                     "actionable_suggestion": diag_suggestion,
+                    "gpu_profile": {"has_gpu": has_gpu, "reason": gpu_info.get("reason"), "devices": gpu_info.get("devices", [])},
+                    "pytorch_telemetry": pip_telemetry,
+                    "pytorch_wheel_check": wheel_check,
+                    "cuda_packages_detected_on_cpu": cuda_on_cpu,
                     "stderr_tail": se_clean[-2000:],
                     "stdout_tail": so_clean[-2000:],
                     "system_resources": get_system_resource_info(),
@@ -1147,6 +1411,11 @@ async def prepare_environment(
                 )
                 state = "DEPENDENCY_INSTALL_BLOCKED" if diag_status == "DEPENDENCY_INSTALL_NETWORK_ERROR" else "DEPENDENCY_INSTALL_FAILED"
                 emit("dependency_install_failed", f"Dependency installation failed with code {rc}", {"state": state, "exit_code": rc})
+                if cuda_on_cpu:
+                    diag_suggestion = (
+                        f"Unnecessary NVIDIA CUDA packages were detected in a CPU-only environment ({', '.join(pip_telemetry['transitive_nvidia_dependencies'])}). "
+                        "AgentHarness uses '--extra-index-url https://download.pytorch.org/whl/cpu' to avoid CUDA package explosion."
+                    )
                 diagnostics = {
                     "reason": diag_reason,
                     "failure_code": diag_status,
@@ -1157,6 +1426,10 @@ async def prepare_environment(
                     "failed_command": cmd_str,
                     "declared_packages": declared_packages,
                     "actionable_suggestion": diag_suggestion,
+                    "gpu_profile": {"has_gpu": has_gpu, "reason": gpu_info.get("reason"), "devices": gpu_info.get("devices", [])},
+                    "pytorch_telemetry": pip_telemetry,
+                    "pytorch_wheel_check": wheel_check,
+                    "cuda_packages_detected_on_cpu": cuda_on_cpu,
                     "stderr_tail": se_clean[-2000:],
                     "stdout_tail": so_clean[-2000:],
                     "system_resources": get_system_resource_info(),
@@ -1228,6 +1501,10 @@ async def prepare_environment(
                         f"Declared package '{failed_pkg}' was not importable after installation ({import_err}). "
                         "Verify package dependencies and build prerequisites."
                     ),
+                    "gpu_profile": {"has_gpu": has_gpu, "reason": gpu_info.get("reason"), "devices": gpu_info.get("devices", [])},
+                    "pytorch_telemetry": pip_telemetry,
+                    "pytorch_wheel_check": wheel_check,
+                    "cuda_packages_detected_on_cpu": cuda_on_cpu,
                     "stderr_tail": import_err or "",
                     "stdout_tail": "",
                     "system_resources": get_system_resource_info(),
@@ -1259,6 +1536,17 @@ async def prepare_environment(
                 "declared_packages": declared_packages,
                 "status": "DEPENDENCIES_READY",
                 "verified_imports": True,
+                "gpu_profile": {
+                    "has_gpu": has_gpu,
+                    "reason": gpu_info.get("reason"),
+                    "devices": gpu_info.get("devices", []),
+                },
+                "pytorch_info": {
+                    "has_torch": has_torch,
+                    "wheel_check": wheel_check,
+                    "pip_telemetry": pip_telemetry,
+                    "extra_index_used": extra_index_used,
+                },
             }, indent=2), encoding="utf-8")
 
             if not workspace_venv_link.exists():
@@ -1289,6 +1577,14 @@ async def prepare_environment(
                 "output": combined_log[-5000:],
                 "diagnostics": {
                     "system_resources": get_system_resource_info(),
+                    "gpu_profile": {
+                        "has_gpu": has_gpu,
+                        "reason": gpu_info.get("reason"),
+                        "devices": gpu_info.get("devices", []),
+                    },
+                    "pytorch_telemetry": pip_telemetry,
+                    "pytorch_wheel_check": wheel_check,
+                    "cuda_packages_detected_on_cpu": cuda_on_cpu,
                 },
             }
 
