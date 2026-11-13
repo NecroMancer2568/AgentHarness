@@ -380,6 +380,12 @@ button:disabled {
   color: #f87171;
 }
 
+.pl.timed_out, .pl.cancelled {
+  border-color: rgba(248, 113, 113, 0.5);
+  background: rgba(248, 113, 113, 0.12);
+  color: #f87171;
+}
+
 .pl.running {
   border-color: rgba(96, 165, 250, 0.5);
   background: rgba(96, 165, 250, 0.12);

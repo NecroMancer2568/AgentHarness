@@ -103,7 +103,7 @@ class AgentExecutor:
         self.llm, self.runtime, self.event = llm, runtime, event
         self.usage = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "inference_ms": 0, "tool_calls": 0}
 
-    async def run(self, role: str, task: str, context: str = "", max_steps: int = 8, tools_enabled: bool = True) -> dict[str, Any]:
+    async def run(self, role: str, task: str, context: str = "", max_steps: int = 8, tools_enabled: bool = True, timeout: float | None = None) -> dict[str, Any]:
         self.event("agent_started", f"{role.replace('_', ' ').title()} started", {"role": role})
         role_started = time.perf_counter()
         role_calls = 0
@@ -118,11 +118,19 @@ class AgentExecutor:
         tools = self.runtime.tool_definitions(ROLE_TOOLS[role]) if tools_enabled and role in ROLE_TOOLS else None
         final_text = ""
         latest_content = ""
-        last_tool_sig = None
+        tool_call_counts: dict[tuple[str, str], int] = {}
+        max_duplicates = getattr(self.runtime.settings, "agentharness_max_duplicate_tool_calls", 2)
+        max_agent_tool_calls = getattr(self.runtime.settings, "agentharness_max_tool_calls_per_agent", 12)
+        consecutive_same_content = 0
 
         for step in range(max_steps if tools else 1):
-            # If on the final available step and tools were already used, steer the agent to provide its final synthesis
-            is_final_step = (step == max_steps - 1) and (tools is not None) and (role_tool_calls > 0)
+            # Check elapsed time against role timeout
+            if timeout and (time.perf_counter() - role_started) >= timeout:
+                self.event("agent_timeout", f"{role.replace('_', ' ').title()} reached stage timeout ({timeout}s)", {"role": role, "elapsed_s": timeout})
+                break
+
+            # If on the final available step or tool budget reached, steer the agent to provide its final synthesis
+            is_final_step = ((step == max_steps - 1) or (role_tool_calls >= max_agent_tool_calls)) and (tools is not None) and (role_tool_calls > 0)
             current_tools = None if is_final_step else tools
             if is_final_step:
                 messages.append({
@@ -130,7 +138,6 @@ class AgentExecutor:
                     "content": "You have gathered your evidence and reached the final step. Synthesize your findings and provide your complete final response now without calling further tools."
                 })
 
-            started = time.perf_counter()
             try:
                 result = await self.llm.chat(
                     messages=messages,
@@ -140,7 +147,8 @@ class AgentExecutor:
                 )
             except Exception as exc:
                 self.event("agent_error", f"{role} model call failed", {"error": str(exc)[:1500]})
-                raise
+                final_text = latest_content or f"{role.replace('_', ' ').title()} encountered a provider error: {exc}"
+                break
 
             self.usage["calls"] += 1
             role_calls += 1
@@ -156,10 +164,27 @@ class AgentExecutor:
             tool_calls = getattr(msg, "tool_calls", None) or []
             content = msg.content or ""
             if content.strip():
+                if content.strip() == latest_content.strip():
+                    consecutive_same_content += 1
+                else:
+                    consecutive_same_content = 0
                 latest_content = content.strip()
 
             if not tool_calls:
                 final_text = content
+                break
+
+            if role_tool_calls >= max_agent_tool_calls:
+                self.event("tool_budget_exceeded", f"{role} tool call budget reached", {"budget": max_agent_tool_calls})
+                final_text = content or latest_content or "Tool call budget reached."
+                break
+
+            if not current_tools and tool_calls:
+                final_text = content or latest_content
+                break
+
+            if consecutive_same_content >= 2:
+                final_text = latest_content
                 break
 
             messages.append({
@@ -181,12 +206,28 @@ class AgentExecutor:
                 except json.JSONDecodeError:
                     args = {}
 
-                # Avoid duplicate identical tool calls in sequence
+                # Avoid repeated duplicate tool calls across the entire turn
                 sig = (name, json.dumps(args, sort_keys=True))
-                if sig == last_tool_sig:
-                    messages.append({"role": "tool", "tool_call_id": tc.id, "content": f"Tool '{name}' was already executed with identical arguments. Use the existing result above and proceed."})
+                count = tool_call_counts.get(sig, 0)
+                if count >= max_duplicates:
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": f"Repeated tool-call loop detected: Tool '{name}' has already been executed {count} times with these arguments in this session. Do not call it again. Synthesize your findings and proceed."
+                    })
+                    self.event("tool_loop_prevented", f"{role} duplicate tool call prevented for {name}", {"tool": name, "count": count})
                     continue
-                last_tool_sig = sig
+
+                if role_tool_calls >= max_agent_tool_calls:
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": f"Tool call budget exceeded for {role} ({max_agent_tool_calls} tool calls). Synthesize your findings with the evidence gathered so far."
+                    })
+                    self.event("tool_budget_exceeded", f"{role} tool call budget reached", {"tool": name, "budget": max_agent_tool_calls})
+                    break
+
+                tool_call_counts[sig] = count + 1
 
                 self.event("tool_started", f"{role} called {name}", {"tool": name, "arguments": args})
                 tool_started = time.perf_counter()

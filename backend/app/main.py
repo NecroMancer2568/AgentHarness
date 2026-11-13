@@ -23,9 +23,13 @@ benchmark_manager = BenchmarkManager(settings, db, run_manager, repos)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    db.cleanup_stale_runs()
     yield
-    for task in list(run_manager.tasks.values()) + list(benchmark_manager.tasks.values()):
-        if not task.done(): task.cancel()
+    all_tasks = [t for t in list(run_manager.tasks.values()) + list(benchmark_manager.tasks.values()) if not t.done()]
+    for task in all_tasks:
+        task.cancel()
+    if all_tasks:
+        await asyncio.gather(*all_tasks, return_exceptions=True)
     await llm.client.close()
 
 app = FastAPI(title="AgentHarness Lab API", version="1.0.0", description="Local multi-agent software engineering workbench", lifespan=lifespan)
@@ -132,7 +136,7 @@ async def stream_events(run_id: str, request: Request, after_id: int = 0):
                 yield f"id: {cursor}\nevent: {event['event_type']}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
                 last_ping = time.monotonic()
             row = db.get_run(run_id)
-            if row and row["status"] in {"succeeded", "failed", "cancelled", "success_with_warnings"} and not events:
+            if row and row["status"] in {"succeeded", "failed", "cancelled", "success_with_warnings", "timed_out"} and not events:
                 yield "event: done\ndata: {}\n\n"
                 break
             # Periodic SSE comment ping every 15s keeps proxies and browsers from timing out

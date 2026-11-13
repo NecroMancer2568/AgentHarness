@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Any, Literal
 from pydantic import BaseModel, Field
 
-RunStatus = Literal["queued", "running", "succeeded", "failed", "cancelled", "success_with_warnings"]
+RunStatus = Literal["queued", "running", "succeeded", "failed", "cancelled", "success_with_warnings", "timed_out"]
 
 class RunCreate(BaseModel):
     repository: str = Field(min_length=1, max_length=200)

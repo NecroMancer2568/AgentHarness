@@ -1255,6 +1255,8 @@ function RunHistory({
             <option value="succeeded">Succeeded</option>
             <option value="success_with_warnings">Success with warnings</option>
             <option value="failed">Failed</option>
+            <option value="timed_out">Timed out</option>
+            <option value="cancelled">Cancelled</option>
             <option value="running">Running</option>
             <option value="queued">Queued</option>
           </select>

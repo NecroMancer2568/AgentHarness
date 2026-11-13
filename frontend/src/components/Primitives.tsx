@@ -55,7 +55,7 @@ export function StatusPill({ status }: { status: string }) {
       ? XCircle
       : s === 'running'
       ? Loader2
-      : s === 'queued'
+      : s === 'timed_out' || s === 'queued'
       ? Clock3
       : AlertCircle
   return (

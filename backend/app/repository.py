@@ -5,6 +5,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -661,6 +662,27 @@ class RepositoryManager:
         if target.exists():
             await asyncio.to_thread(shutil.rmtree, target, True)
 
+
+def _kill_process_tree(proc: asyncio.subprocess.Process | None):
+    """Safely terminate a subprocess and all its child processes in its process group."""
+    if not proc:
+        return
+    is_posix = sys.platform != "win32"
+    try:
+        if is_posix and hasattr(proc, "pid") and proc.pid:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        else:
+            proc.terminate()
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+    try:
+        proc.kill()
+        if is_posix and hasattr(proc, "pid") and proc.pid:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+
+
 class ToolRuntime:
     def __init__(
         self,
@@ -671,6 +693,7 @@ class ToolRuntime:
         declared_packages: list[str] | None = None,
         event_callback=None,
         dependency_status: str = "DEPENDENCIES_READY",
+        dep_info: dict[str, Any] | None = None,
     ):
         self.workspace = workspace.resolve()
         self.settings = settings
@@ -679,6 +702,7 @@ class ToolRuntime:
         self.declared_packages = declared_packages or []
         self.event_callback = event_callback
         self.dependency_status = dependency_status
+        self.dep_info = dep_info or {}
         self.tool_count = 0
         self.test_results: list[dict[str, Any]] = []
 
@@ -1069,13 +1093,15 @@ class ToolRuntime:
 
         self._emit("tool_started", "Running command: " + " ".join(command), {"command": command})
         started = time.perf_counter()
+        proc = None
         try:
             safe_env = self._build_env()
             exec_cmd = self._resolve_executable(command)
 
             proc = await asyncio.create_subprocess_exec(
                 *exec_cmd, cwd=self.workspace,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=safe_env
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=safe_env,
+                start_new_session=(sys.platform != "win32"),
             )
             timed_out = False
             try:
@@ -1084,14 +1110,14 @@ class ToolRuntime:
                 stderr = stderr_b.decode(errors="replace")
                 exit_code = proc.returncode
             except asyncio.TimeoutError:
-                proc.kill()
+                _kill_process_tree(proc)
                 stdout_b, stderr_b = await proc.communicate()
                 stdout = stdout_b.decode(errors="replace")
                 stderr = stderr_b.decode(errors="replace")
                 exit_code = None
                 timed_out = True
             except asyncio.CancelledError:
-                proc.kill()
+                _kill_process_tree(proc)
                 await proc.communicate()
                 raise
 
@@ -1162,18 +1188,22 @@ class ToolRuntime:
 
     async def _run_command(self, command: list[str], timeout: int) -> str:
         self._emit("tool_started", "Running command: " + " ".join(command), {"command": command})
+        proc = None
         try:
             safe_env = self._build_env()
             exec_cmd = self._resolve_executable(command)
-            proc = await asyncio.create_subprocess_exec(*exec_cmd, cwd=self.workspace,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, env=safe_env)
+            proc = await asyncio.create_subprocess_exec(
+                *exec_cmd, cwd=self.workspace,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, env=safe_env,
+                start_new_session=(sys.platform != "win32"),
+            )
             try: stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
             except asyncio.TimeoutError:
-                proc.kill(); stdout, _ = await proc.communicate()
+                _kill_process_tree(proc); stdout, _ = await proc.communicate()
                 output = stdout.decode(errors="replace") + f"\nCommand timed out after {timeout}s."
                 return self._clip(output)
             except asyncio.CancelledError:
-                proc.kill()
+                _kill_process_tree(proc)
                 await proc.communicate()
                 raise
             output = stdout.decode(errors="replace")

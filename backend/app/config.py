@@ -42,6 +42,12 @@ class Settings(BaseSettings):
     agentharness_max_tool_output_chars: int = 12000
     agentharness_cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173,http://localhost:8080,http://127.0.0.1:8080,http://localhost,http://127.0.0.1"
     agentharness_dependency_timeout_seconds: int = 300
+    agentharness_overall_run_timeout_seconds: int = 900
+    agentharness_stage_timeout_seconds: int = 180
+    agentharness_heartbeat_interval_seconds: int = 10
+    agentharness_max_tool_calls_per_agent: int = 12
+    agentharness_max_duplicate_tool_calls: int = 2
+    agentharness_max_agent_handoffs: int = 10
     agentharness_venv_cache_root: str = "workspace/venvs"
     agentharness_pip_cache_dir: str = "workspace/pip_cache"
     agentharness_pip_extra_index_url: str = ""

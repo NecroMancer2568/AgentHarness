@@ -9,6 +9,8 @@ from typing import Any
 def utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
 
+TERMINAL_STATUSES = {"succeeded", "failed", "cancelled", "success_with_warnings", "timed_out"}
+
 class Database:
     def __init__(self, path: Path):
         self.path = path
@@ -63,15 +65,40 @@ class Database:
                       (run_id, repository, task, test_command, max_agent_steps, "queued", now, now))
         self.add_event(run_id, "run_queued", None, "Run queued", {"repository": repository})
 
-    def update_run(self, run_id: str, **fields):
+    def update_run(self, run_id: str, force: bool = False, **fields):
         allowed = {"status", "updated_at", "started_at", "finished_at", "duration_ms", "success", "total_tokens",
                    "prompt_tokens", "completion_tokens", "llm_calls", "result_json", "metrics_json", "error", "workspace_path"}
         fields = {k: v for k, v in fields.items() if k in allowed}
         fields.setdefault("updated_at", utcnow())
         if not fields: return
-        assignments = ",".join(f"{key}=?" for key in fields)
+
+        # Enforce terminal state immutability unless force is explicitly set
         with self.connection() as c:
+            if not force and "status" in fields:
+                cur = c.execute("SELECT status FROM runs WHERE id=?", (run_id,)).fetchone()
+                if cur and cur[0] in TERMINAL_STATUSES:
+                    new_status = fields["status"]
+                    # If already in an unrecoverable terminal state, do not overwrite status
+                    if cur[0] in {"cancelled", "timed_out", "failed"}:
+                        fields.pop("status", None)
+                    elif new_status not in TERMINAL_STATUSES:
+                        fields.pop("status", None)
+                    if not fields:
+                        return
+
+            assignments = ",".join(f"{key}=?" for key in fields)
             c.execute(f"UPDATE runs SET {assignments} WHERE id=?", (*fields.values(), run_id))
+
+    def cleanup_stale_runs(self) -> int:
+        """Mark any runs left in non-terminal states after server restart/crash as failed."""
+        now = utcnow()
+        with self.connection() as c:
+            cur = c.execute("""
+                UPDATE runs
+                SET status='failed', finished_at=?, error='Execution interrupted: server restarted or worker process terminated unexpectedly.'
+                WHERE status NOT IN ('succeeded', 'failed', 'cancelled', 'success_with_warnings', 'timed_out')
+            """, (now,))
+            return cur.rowcount
 
     def add_event(self, run_id: str, event_type: str, agent: str | None, message: str, data: dict[str, Any] | None = None):
         with self.connection() as c:
@@ -105,8 +132,8 @@ class Database:
               AVG(CASE WHEN duration_ms IS NOT NULL THEN duration_ms END) avg_duration_ms,
               SUM(total_tokens) total_tokens, SUM(llm_calls) llm_calls,
               SUM(prompt_tokens) prompt_tokens, SUM(completion_tokens) completion_tokens
-              FROM runs WHERE status IN ('succeeded','failed','success_with_warnings')""").fetchone()
-            recent = c.execute("SELECT duration_ms FROM runs WHERE status IN ('succeeded','failed','success_with_warnings') AND duration_ms IS NOT NULL ORDER BY duration_ms").fetchall()
+              FROM runs WHERE status IN ('succeeded','failed','success_with_warnings','timed_out')""").fetchone()
+            recent = c.execute("SELECT duration_ms FROM runs WHERE status IN ('succeeded','failed','success_with_warnings','timed_out') AND duration_ms IS NOT NULL ORDER BY duration_ms").fetchall()
         values = dict(row)
         durations = [r[0] for r in recent]
         p95 = durations[min(len(durations)-1, int((len(durations)-1)*0.95))] if durations else None

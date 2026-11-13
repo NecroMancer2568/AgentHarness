@@ -13,7 +13,7 @@ from .config import Settings
 from .db import Database, utcnow
 from .dependencies import prepare_environment
 from .llm import LLMClient
-from .repository import RepositoryManager, ToolRuntime, WorkspaceError
+from .repository import RepositoryManager, ToolRuntime, WorkspaceError, _kill_process_tree
 
 
 def parse_json_loose(text: str) -> dict[str, Any]:
@@ -542,6 +542,10 @@ def evaluate_final_status(
     # 2. Execution Status
     if dependency_status and dependency_status != "DEPENDENCIES_READY":
         execution_status = "BLOCKED"
+    elif implementation_status == "TIMED_OUT":
+        execution_status = "TIMED_OUT"
+    elif implementation_status == "CANCELLED":
+        execution_status = "CANCELLED"
     elif implementation_status == "NOT_IMPLEMENTED":
         execution_status = "NOT_COMPLETED"
     elif implementation_status == "FAILED":
@@ -553,6 +557,11 @@ def evaluate_final_status(
     checks_passed: list[str] = []
     checks_failed: list[str] = []
     checks_skipped: list[str] = []
+
+    if execution_status == "TIMED_OUT":
+        checks_failed.append(f"Execution timed out: {error_message or 'Workflow deadline exceeded'}")
+    elif execution_status == "CANCELLED":
+        checks_failed.append("Execution cancelled by user")
 
     # Dependency check
     if dependency_status and dependency_status != "DEPENDENCIES_READY":
@@ -654,7 +663,7 @@ def evaluate_final_status(
         notification = "Execution completed with warnings: " + "; ".join(warnings)
 
     # 6. Final Status
-    if execution_status in {"BLOCKED", "NOT_COMPLETED", "FAILED"}:
+    if execution_status in {"BLOCKED", "NOT_COMPLETED", "FAILED", "TIMED_OUT", "CANCELLED"}:
         final_status = "FAILED"
     elif verification_status in {"FAILED_VERIFICATION", "BLOCKED", "UNVERIFIED"}:
         final_status = "FAILED"
@@ -667,7 +676,16 @@ def evaluate_final_status(
             final_status = "SUCCESS"
 
     success = (final_status in {"SUCCESS", "SUCCESS_WITH_WARNINGS"})
-    db_status = "succeeded" if final_status == "SUCCESS" else ("success_with_warnings" if final_status == "SUCCESS_WITH_WARNINGS" else "failed")
+    if execution_status == "TIMED_OUT":
+        db_status = "timed_out"
+    elif execution_status == "CANCELLED":
+        db_status = "cancelled"
+    elif final_status == "SUCCESS":
+        db_status = "succeeded"
+    elif final_status == "SUCCESS_WITH_WARNINGS":
+        db_status = "success_with_warnings"
+    else:
+        db_status = "failed"
 
     return {
         "final_status": final_status,
@@ -930,14 +948,275 @@ def compute_verification_state(
     return overall_verdict, test_passed, review_approved, error_msg, review_details
 
 
+class WorkflowError(Exception):
+    """Base exception for workflow orchestration failures."""
+    pass
+
+
+class RunTimeoutError(WorkflowError):
+    """Raised when an overall run execution exceeds the configured run deadline."""
+    pass
+
+
+class StageTimeoutError(WorkflowError):
+    """Raised when a specific workflow stage exceeds its allocated timeout."""
+    pass
+
+
+class WorkflowStage:
+    QUEUED = "QUEUED"
+    PREPARING_DEPENDENCIES = "PREPARING_DEPENDENCIES"
+    RECORDING_BASELINE = "RECORDING_BASELINE"
+    PLANNING = "PLANNING"
+    ANALYZING = "ANALYZING"
+    CODING = "CODING"
+    TESTING_DEBUGGING = "TESTING_DEBUGGING"
+    VERIFYING = "VERIFYING"
+    REVIEWING = "REVIEWING"
+    FINALIZING = "FINALIZING"
+
+
+class WorkflowTracker:
+    def __init__(
+        self,
+        run_id: str,
+        overall_timeout_seconds: float,
+        stage_timeout_seconds: float,
+        max_agent_handoffs: int,
+        event_callback: Any = None,
+    ):
+        self.run_id = run_id
+        self.overall_timeout_seconds = max(10.0, float(overall_timeout_seconds))
+        self.stage_timeout_seconds = max(5.0, float(stage_timeout_seconds))
+        self.max_agent_handoffs = max_agent_handoffs
+        self.event_callback = event_callback
+
+        self.started_at = time.perf_counter()
+        self.overall_deadline = self.started_at + self.overall_timeout_seconds
+        self.stage = WorkflowStage.QUEUED
+        self.stage_start_time = self.started_at
+        self.handoff_count = 0
+        self.stage_history: list[dict[str, Any]] = []
+        self.stage_action_counts: dict[str, int] = {}
+        self.current_agent: str | None = None
+        self.is_terminal = False
+
+    def check_deadline(self) -> None:
+        now = time.perf_counter()
+        if now >= self.overall_deadline:
+            elapsed = round((now - self.started_at) * 1000)
+            raise RunTimeoutError(
+                f"Overall run execution deadline exceeded ({self.overall_timeout_seconds}s limit, ran for {elapsed}ms in stage {self.stage})"
+            )
+
+    def get_remaining_run_budget(self) -> float:
+        return max(0.0, self.overall_deadline - time.perf_counter())
+
+    def get_remaining_stage_budget(self, override_timeout: float | None = None) -> float:
+        self.check_deadline()
+        stage_limit = override_timeout if override_timeout is not None else self.stage_timeout_seconds
+        remaining_in_stage = max(1.0, stage_limit - (time.perf_counter() - self.stage_start_time))
+        remaining_run = self.get_remaining_run_budget()
+        return max(1.0, min(remaining_in_stage, remaining_run))
+
+    def transition(self, new_stage: str, agent: str | None = None) -> None:
+        self.check_deadline()
+        now = time.perf_counter()
+        old_stage = self.stage
+        duration_ms = round((now - self.stage_start_time) * 1000)
+
+        self.stage_history.append({
+            "stage": old_stage,
+            "duration_ms": duration_ms,
+            "agent": self.current_agent,
+            "actions": self.stage_action_counts.get(old_stage, 0),
+        })
+
+        self.stage = new_stage
+        self.stage_start_time = now
+        self.current_agent = agent
+
+        if self.event_callback:
+            self.event_callback(
+                "stage_transition",
+                f"Transitioned from {old_stage} to {new_stage}",
+                {
+                    "from_stage": old_stage,
+                    "to_stage": new_stage,
+                    "previous_duration_ms": duration_ms,
+                    "agent": agent,
+                    "remaining_budget_s": round(self.get_remaining_run_budget(), 1),
+                },
+                agent=agent,
+            )
+
+    def record_handoff(self, from_agent: str, to_agent: str) -> None:
+        self.check_deadline()
+        self.handoff_count += 1
+        if self.handoff_count > self.max_agent_handoffs:
+            raise WorkflowError(
+                f"Maximum agent handoffs exceeded ({self.handoff_count} > {self.max_agent_handoffs}). Circular routing prevented."
+            )
+        if self.event_callback:
+            self.event_callback(
+                "agent_handoff",
+                f"Agent handoff: {from_agent} -> {to_agent} (handoff #{self.handoff_count}/{self.max_agent_handoffs})",
+                {
+                    "from_agent": from_agent,
+                    "to_agent": to_agent,
+                    "handoff_count": self.handoff_count,
+                    "max_handoffs": self.max_agent_handoffs,
+                },
+                agent=to_agent,
+            )
+
+    def record_action(self, action_name: str) -> None:
+        self.stage_action_counts[self.stage] = self.stage_action_counts.get(self.stage, 0) + 1
+
+    def emit_heartbeat(self) -> None:
+        if self.is_terminal:
+            return
+        now = time.perf_counter()
+        stage_elapsed = round((now - self.stage_start_time) * 1000)
+        total_elapsed = round((now - self.started_at) * 1000)
+        remaining = max(0.0, self.overall_deadline - now)
+        if self.event_callback:
+            self.event_callback(
+                "stage_heartbeat",
+                f"Heartbeat: stage {self.stage} running for {stage_elapsed}ms (total: {total_elapsed}ms, {remaining:.1f}s left)",
+                {
+                    "stage": self.stage,
+                    "current_agent": self.current_agent,
+                    "stage_elapsed_ms": stage_elapsed,
+                    "total_elapsed_ms": total_elapsed,
+                    "remaining_run_budget_seconds": round(remaining, 1),
+                    "handoff_count": self.handoff_count,
+                },
+                agent=self.current_agent,
+            )
+
+
 class RunManager:
     def __init__(self, settings: Settings, db: Database, llm: LLMClient, repos: RepositoryManager):
         self.settings, self.db, self.llm, self.repos = settings, db, llm, repos
         self.tasks: dict[str, asyncio.Task] = {}
         self.semaphore = asyncio.Semaphore(max(1, settings.agentharness_max_parallel_readers))
+        self._finalized_runs: set[str] = set()
 
     def event(self, run_id: str, event_type: str, message: str, data: dict[str, Any] | None = None, agent: str | None = None):
         self.db.add_event(run_id, event_type, agent, message, data or {})
+
+    async def _heartbeat_loop(self, tracker: WorkflowTracker):
+        interval = max(2, self.settings.agentharness_heartbeat_interval_seconds)
+        try:
+            while not tracker.is_terminal:
+                await asyncio.sleep(interval)
+                tracker.emit_heartbeat()
+        except asyncio.CancelledError:
+            pass
+
+    def _finalize_run(
+        self,
+        run_id: str,
+        *,
+        status: str,
+        duration_ms: int,
+        metrics: dict[str, Any],
+        result: dict[str, Any],
+        evaluation_report: dict[str, Any],
+        error_msg: str | None = None,
+        workspace: Path | None = None,
+        notification: str | None = None,
+        usage_totals: dict[str, Any] | None = None,
+    ) -> bool:
+        """
+        Idempotent run finalization. Enforces that run termination events,
+        DB updates, and disk evaluation artifacts are written exactly once.
+        """
+        if run_id in self._finalized_runs:
+            return False
+        self._finalized_runs.add(run_id)
+
+        usage = usage_totals or {
+            "calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0
+        }
+
+        # Write evaluation.json
+        try:
+            eval_bytes = json.dumps(evaluation_report, indent=2, ensure_ascii=False)
+            if workspace and workspace.is_dir():
+                (workspace / "evaluation.json").write_text(eval_bytes, encoding="utf-8")
+            runs_dir = self.settings.runs_root / run_id
+            runs_dir.mkdir(parents=True, exist_ok=True)
+            (runs_dir / "evaluation.json").write_text(eval_bytes, encoding="utf-8")
+        except Exception:
+            pass
+
+        # Update database with immutable terminal status
+        self.db.update_run(
+            run_id,
+            status=status,
+            finished_at=utcnow(),
+            duration_ms=duration_ms,
+            success=int(result.get("success", False)),
+            total_tokens=usage.get("total_tokens", 0),
+            prompt_tokens=usage.get("prompt_tokens", 0),
+            completion_tokens=usage.get("completion_tokens", 0),
+            llm_calls=usage.get("calls", 0),
+            result_json=json.dumps(result, ensure_ascii=False),
+            metrics_json=json.dumps(metrics),
+            error=error_msg,
+        )
+
+        # Emit terminal events
+        self.event(
+            run_id,
+            "verification_evaluated",
+            f"Verification state: {metrics.get('verification_state', 'UNKNOWN')} (final: {metrics.get('final_status', 'UNKNOWN')})",
+            {
+                "verification_state": metrics.get("verification_state"),
+                "final_status": metrics.get("final_status"),
+                "execution_status": metrics.get("execution_status"),
+                "verification_status": metrics.get("verification_status"),
+                "repository_health": metrics.get("repository_health"),
+                "warnings": metrics.get("warnings", []),
+                "notification": notification or metrics.get("notification"),
+                "verification_details": metrics.get("verification_details", {}),
+                "test_passed": metrics.get("test_passed", False),
+                "review_approved": metrics.get("review_approved", False),
+                "metrics": {
+                    "collected": metrics.get("tests_collected", 0),
+                    "passed": metrics.get("tests_passed", 0),
+                    "failed": metrics.get("tests_failed", 0),
+                    "skipped": metrics.get("tests_skipped", 0),
+                    "errors": 0,
+                },
+            },
+        )
+
+        self.event(
+            run_id,
+            "run_finished",
+            notification or (
+                "Run completed successfully" if result.get("success")
+                else f"Run finished ({status}): {error_msg or 'Execution finished'}"
+            ),
+            {
+                "success": result.get("success", False),
+                "final_status": metrics.get("final_status"),
+                "execution_status": metrics.get("execution_status"),
+                "verification_status": metrics.get("verification_status"),
+                "repository_health": metrics.get("repository_health"),
+                "warnings": metrics.get("warnings", []),
+                "notification": notification or metrics.get("notification"),
+                "verification_state": metrics.get("verification_state"),
+                "duration_ms": duration_ms,
+                "total_tokens": usage.get("total_tokens", 0),
+                "llm_calls": usage.get("calls", 0),
+                "metrics": metrics,
+            },
+        )
+        return True
 
     async def execute(self, run_id: str):
         row = self.db.get_run(run_id)
@@ -948,12 +1227,25 @@ class RunManager:
         workspace: Path | None = None
         usage_totals = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "inference_ms": 0, "tool_calls": 0}
         agent_outputs: dict[str, str] = {}
+        dep_status = None
+        test_generation_completed = False
+
+        tracker = WorkflowTracker(
+            run_id=run_id,
+            overall_timeout_seconds=self.settings.agentharness_overall_run_timeout_seconds,
+            stage_timeout_seconds=self.settings.agentharness_stage_timeout_seconds,
+            max_agent_handoffs=self.settings.agentharness_max_agent_handoffs,
+            event_callback=lambda typ, msg, data, agent=None: self.event(run_id, typ, msg, data, agent=agent),
+        )
+        heartbeat_task = asyncio.create_task(self._heartbeat_loop(tracker))
+
         try:
             repo = self.repos.resolve_repository(row["repository"])
             workspace = await self.repos.create_workspace(repo, run_id)
             self.db.update_run(run_id, workspace_path=str(workspace))
             self.event(run_id, "workspace_ready", "Created a disposable Git clone for this run", {"workspace": str(workspace)})
 
+            tracker.transition(WorkflowStage.PREPARING_DEPENDENCIES)
             # Prepare environment (manifest inspection, isolated virtualenv, package installation)
             dep_info = await prepare_environment(
                 workspace,
@@ -969,6 +1261,7 @@ class RunManager:
                 diagnostics = dep_info.get("diagnostics", {})
                 duration_ms = round((time.perf_counter() - started) * 1000)
 
+                tracker.transition(WorkflowStage.FINALIZING)
                 final_eval = evaluate_final_status(
                     dependency_status=dep_status,
                     dependency_source=dep_info.get("dependency_source", "manifest"),
@@ -1137,64 +1430,17 @@ class RunManager:
                     "metrics": metrics,
                     "diagnostics": diagnostics,
                 }
-                try:
-                    (workspace / "evaluation.json").write_text(json.dumps(evaluation_report, indent=2, ensure_ascii=False), encoding="utf-8")
-                    (self.settings.runs_root / run_id / "evaluation.json").write_text(json.dumps(evaluation_report, indent=2, ensure_ascii=False), encoding="utf-8")
-                except Exception:
-                    pass
 
-                self.db.update_run(
+                self._finalize_run(
                     run_id,
                     status=final_eval["db_status"],
-                    finished_at=utcnow(),
                     duration_ms=duration_ms,
-                    success=0,
-                    total_tokens=0,
-                    prompt_tokens=0,
-                    completion_tokens=0,
-                    llm_calls=0,
-                    result_json=json.dumps(result, ensure_ascii=False),
-                    metrics_json=json.dumps(metrics),
-                    error=error_msg,
-                )
-
-                self.event(
-                    run_id,
-                    "verification_evaluated",
-                    f"Verification state: {dep_status}",
-                    {
-                        "verification_state": dep_status,
-                        "final_status": final_eval["final_status"],
-                        "execution_status": final_eval["execution_status"],
-                        "verification_status": final_eval["verification_status"],
-                        "repository_health": final_eval["repository_health"],
-                        "warnings": final_eval["warnings"],
-                        "notification": final_eval["notification"],
-                        "verification_details": final_eval["verification_details"],
-                        "test_passed": False,
-                        "review_approved": False,
-                        "metrics": {"collected": 0, "passed": 0, "failed": 0, "skipped": 0, "errors": 0},
-                    }
-                )
-
-                self.event(
-                    run_id,
-                    "run_finished",
-                    f"Run finished ({dep_status}): {error_msg}",
-                    {
-                        "success": False,
-                        "verification_state": dep_status,
-                        "final_status": final_eval["final_status"],
-                        "execution_status": final_eval["execution_status"],
-                        "verification_status": final_eval["verification_status"],
-                        "repository_health": final_eval["repository_health"],
-                        "warnings": final_eval["warnings"],
-                        "notification": final_eval["notification"],
-                        "duration_ms": duration_ms,
-                        "total_tokens": 0,
-                        "llm_calls": 0,
-                        "metrics": metrics,
-                    }
+                    metrics=metrics,
+                    result=result,
+                    evaluation_report=evaluation_report,
+                    error_msg=error_msg,
+                    workspace=workspace,
+                    usage_totals=usage_totals,
                 )
                 return
 
@@ -1209,6 +1455,7 @@ class RunManager:
                 declared_packages=declared_packages,
                 event_callback=lambda typ, msg, data: self.event(run_id, typ, msg, data),
                 dependency_status=dep_status,
+                dep_info=dep_info,
             )
             max_steps = min(max(int(row.get("max_agent_steps") or self.settings.agentharness_max_agent_steps), 1), 20)
             executor = AgentExecutor(self.llm, runtime,
@@ -1220,10 +1467,11 @@ class RunManager:
             self.event(run_id, "test_discovery_snapshot", f"Detected {repo_test_info['detected_language']} ({repo_test_info['detected_framework']})", repo_test_info)
 
             # Record baseline tests before any agent modifications
+            tracker.transition(WorkflowStage.RECORDING_BASELINE)
             if has_original_tests:
                 baseline_record = await runtime.run_test_command(
                     repo_test_info.get("recommended_command") or runtime._detect_test_command() or ["python", "-m", "pytest", "-q"],
-                    timeout=min(self.settings.agentharness_test_timeout_seconds, 60)
+                    timeout=min(self.settings.agentharness_test_timeout_seconds, 60, tracker.get_remaining_stage_budget())
                 )
             else:
                 baseline_record = {
@@ -1244,25 +1492,31 @@ class RunManager:
             )
 
             # Step 1: Coordinator
+            tracker.transition(WorkflowStage.PLANNING, agent="coordinator")
             plan_result = await executor.run(
                 "coordinator",
                 row["task"],
                 context="Create an execution plan. Set include_security_review true only if security/auth/secrets/injection are involved.",
                 max_steps=1,
-                tools_enabled=False
+                tools_enabled=False,
+                timeout=min(tracker.get_remaining_stage_budget(), 60.0),
             )
             agent_outputs["coordinator"] = plan_result["output"]
             plan = parse_json_loose(plan_result["output"])
             self.event(run_id, "plan_created", "Coordinator created the execution plan", {"plan": plan}, "coordinator")
 
             # Step 2: Read-only specialist investigation
+            tracker.record_handoff("coordinator", "repository_analyst")
+            tracker.transition(WorkflowStage.ANALYZING, agent="repository_analyst")
+
             async def reader(role: str, extra_ctx: str = ""):
                 async with self.semaphore:
                     return await executor.run(
                         role,
                         row["task"],
                         context=f"Coordinator plan:\n{json.dumps(plan)}\n{extra_ctx}\nInspect repository code using tools; do not edit.",
-                        max_steps=max_steps
+                        max_steps=max_steps,
+                        timeout=tracker.get_remaining_stage_budget(),
                     )
 
             scout_ctx = f"Automated test detection:\n{json.dumps(repo_test_info, indent=2)}"
@@ -1277,6 +1531,9 @@ class RunManager:
                 test_discovery = "Test discovery was skipped by coordinator."
 
             # Step 3: Coding Agent with structured handoff
+            tracker.record_handoff("repository_analyst", "coding_agent")
+            tracker.transition(WorkflowStage.CODING, agent="coding_agent")
+
             coding_context = (
                 f"COORDINATOR PLAN:\n{json.dumps(plan)}\n\n"
                 f"REPOSITORY ANALYSIS:\n{analyst['output'][:2500]}\n\n"
@@ -1289,7 +1546,13 @@ class RunManager:
                 "3. Ensure tests specifically verify the defect fix against domain/market invariants and would fail on unpatched code."
             )
 
-            coder = await executor.run("coding_agent", row["task"], context=coding_context, max_steps=max_steps)
+            coder = await executor.run(
+                "coding_agent",
+                row["task"],
+                context=coding_context,
+                max_steps=max_steps,
+                timeout=tracker.get_remaining_stage_budget(),
+            )
             agent_outputs[coder["role"]] = coder["output"]
 
             # Step 3b: Change-evidence validation & Bounded repair attempt
@@ -1329,7 +1592,8 @@ class RunManager:
                     "coding_agent",
                     row["task"],
                     context=repair_context,
-                    max_steps=min(max_steps, 6)
+                    max_steps=min(max_steps, 6),
+                    timeout=tracker.get_remaining_stage_budget(),
                 )
                 coder["output"] += f"\n\n--- REPAIR ATTEMPT {repair_attempt} ---\n" + coder_repair["output"]
                 agent_outputs["coding_agent"] = coder["output"]
@@ -1367,6 +1631,9 @@ class RunManager:
             )
 
             # Step 4: Test & Debug Agent
+            tracker.record_handoff("coding_agent", "test_debug_agent")
+            tracker.transition(WorkflowStage.TESTING_DEBUGGING, agent="test_debug_agent")
+
             diff_after_coder = await runtime.execute("git_diff", {})
             tester_context = (
                 f"TASK:\n{row['task']}\n\n"
@@ -1380,8 +1647,17 @@ class RunManager:
                 "Run tests using run_tests. Check whether tests exercise the production fix. If tests fail or are missing, diagnose and fix them using write_file."
             )
 
-            tester = await executor.run("test_debug_agent", row["task"], context=tester_context, max_steps=max_steps)
+            tester = await executor.run(
+                "test_debug_agent",
+                row["task"],
+                context=tester_context,
+                max_steps=max_steps,
+                timeout=tracker.get_remaining_stage_budget(),
+            )
             agent_outputs[tester["role"]] = tester["output"]
+
+            # Step 5: Verification & Baseline Validation
+            tracker.transition(WorkflowStage.VERIFYING)
 
             # Re-evaluate changed files after test_debug_agent
             changed_files = await self._changed_files(workspace)
@@ -1389,8 +1665,9 @@ class RunManager:
             test_files = [f for f in test_meta_files if any(ext in f for ext in (".py", ".js", ".ts", ".jsx", ".tsx")) and "test" in f.lower()]
             has_generated_tests = len(test_files) > 0 and not has_original_tests
 
-            # If repository had no tests and agents didn't create any, generate fallback regression test skeleton
-            if not has_original_tests and not test_files and prod_files:
+            # If repository had no tests and agents didn't create any, generate fallback regression test skeleton (at most once)
+            if not has_original_tests and not test_files and prod_files and not test_generation_completed:
+                test_generation_completed = True
                 test_dir_to_use = repo_test_info.get("test_directory") or "tests"
                 gen_path = generate_regression_test_skeleton(
                     workspace, prod_files, row["task"], test_dir=test_dir_to_use
@@ -1436,12 +1713,14 @@ class RunManager:
                             pass
 
                 if saved_prod:
+                    proc = None
                     try:
                         proc = await asyncio.create_subprocess_exec(
                             "git", "checkout", "HEAD", "--", *list(saved_prod.keys()),
-                            cwd=workspace, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                            cwd=workspace, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                            start_new_session=(sys.platform != "win32"),
                         )
-                        await proc.communicate()
+                        await asyncio.wait_for(proc.communicate(), timeout=15.0)
 
                         repro_record = await runtime.run_test_command(
                             runtime._detect_test_command() or ["python", "-m", "pytest", "-q"],
@@ -1464,8 +1743,9 @@ class RunManager:
                                 "Tests passed on unpatched baseline code (they may verify existing behavior only)",
                                 {"outcome": repro_record.get("outcome")}
                             )
-                    except Exception:
-                        pass
+                    except (asyncio.TimeoutError, Exception):
+                        if proc:
+                            _kill_process_tree(proc)
                     finally:
                         # Restore production file contents unconditionally
                         for pf, content in saved_prod.items():
@@ -1474,7 +1754,7 @@ class RunManager:
                             except Exception:
                                 pass
 
-            # Re-run tests on restored patched code if failure-to-pass check ran
+            # Re-run tests on restored patched code only if failure-to-pass check ran and verified
             if failure_to_pass_verified:
                 await runtime.execute("run_tests", {"command": "auto"})
 
@@ -1522,7 +1802,10 @@ class RunManager:
 
             changed_files_summary = "\n".join(f"- {f}" for f in changed_files) or "No files changed."
 
-            # Step 5: Code Reviewer
+            # Step 6: Code Reviewer
+            tracker.record_handoff("test_debug_agent", "code_reviewer")
+            tracker.transition(WorkflowStage.REVIEWING, agent="code_reviewer")
+
             review_context = (
                 f"ORIGINAL TASK / BUG DESCRIPTION:\n{row['task']}\n\n"
                 f"COORDINATOR PLAN:\n{json.dumps(plan)}\n\n"
@@ -1543,20 +1826,36 @@ class RunManager:
                 "4. If production code was fixed, tests pass, and evidence is verified, approve with APPROVE."
             )
 
-            reviewer = await executor.run("code_reviewer", row["task"], context=review_context, max_steps=max_steps)
+            reviewer = await executor.run(
+                "code_reviewer",
+                row["task"],
+                context=review_context,
+                max_steps=max_steps,
+                timeout=tracker.get_remaining_stage_budget(),
+            )
             agent_outputs[reviewer["role"]] = reviewer["output"]
 
-            # Step 6: Security Reviewer (if requested)
+            # Step 7: Security Reviewer (if requested)
             security_review = None
             security_keywords = ("security", "auth", "permission", "secret", "credential", "token", "injection",
                                  "path traversal", "command execution", "authorization", "user data", "sql")
             needs_security_review = bool(plan.get("include_security_review")) or any(word in row["task"].lower() for word in security_keywords)
             if needs_security_review:
-                security_review = await executor.run("security_reviewer", row["task"], context=review_context, max_steps=max_steps)
+                tracker.record_handoff("code_reviewer", "security_reviewer")
+                security_review = await executor.run(
+                    "security_reviewer",
+                    row["task"],
+                    context=review_context,
+                    max_steps=max_steps,
+                    timeout=tracker.get_remaining_stage_budget(),
+                )
                 agent_outputs[security_review["role"]] = security_review["output"]
 
             usage_totals = executor.usage
             duration_ms = round((time.perf_counter() - started) * 1000)
+
+            # Step 8: Finalizing
+            tracker.transition(WorkflowStage.FINALIZING)
 
             # Verification state aggregation
             verification_state, test_passed, review_approved, error_msg, review_details = compute_verification_state(
@@ -1637,7 +1936,7 @@ class RunManager:
                 "inference_ms": usage_totals["inference_ms"],
                 "tool_calls": usage_totals["tool_calls"],
                 "agent_count": len(agent_outputs),
-                "agent_handoffs": max(0, len(agent_outputs) - 1),
+                "agent_handoffs": tracker.handoff_count,
                 "agent_metrics": getattr(executor, "agent_metrics", {}),
                 "dependency_status": dep_info.get("status"),
                 "dependency_preparation": dep_summary,
@@ -1706,7 +2005,6 @@ class RunManager:
                 "security_review": security_review["output"] if security_review else None,
             }
 
-            # Write evaluation.json report recording dependency preparation separately from test results
             evaluation_report = {
                 "run_id": run_id,
                 "repository": row["repository"],
@@ -1746,90 +2044,217 @@ class RunManager:
                 },
                 "metrics": metrics,
             }
-            try:
-                (workspace / "evaluation.json").write_text(json.dumps(evaluation_report, indent=2, ensure_ascii=False), encoding="utf-8")
-                (self.settings.runs_root / run_id / "evaluation.json").write_text(json.dumps(evaluation_report, indent=2, ensure_ascii=False), encoding="utf-8")
-            except Exception:
-                pass
 
-            self.db.update_run(
+            self._finalize_run(
                 run_id,
                 status=db_status,
-                finished_at=utcnow(),
                 duration_ms=duration_ms,
-                success=int(success),
-                total_tokens=usage_totals["total_tokens"],
-                prompt_tokens=usage_totals["prompt_tokens"],
-                completion_tokens=usage_totals["completion_tokens"],
-                llm_calls=usage_totals["calls"],
-                result_json=json.dumps(result, ensure_ascii=False),
-                metrics_json=json.dumps(metrics),
-                error=error_msg,
-            )
-
-            self.event(
-                run_id,
-                "verification_evaluated",
-                f"Verification state: {verification_state} (final: {final_status})",
-                {
-                    "verification_state": verification_state,
-                    "final_status": final_status,
-                    "execution_status": execution_status,
-                    "verification_status": verification_status,
-                    "repository_health": repository_health,
-                    "warnings": warnings,
-                    "notification": notification,
-                    "verification_details": verification_details,
-                    "test_passed": test_passed,
-                    "review_approved": review_approved,
-                    "metrics": last_metrics,
-                }
-            )
-
-            self.event(
-                run_id,
-                "run_finished",
-                notification or ("Run completed successfully" if success else f"Run finished ({verification_state}): {error_msg or 'Verification criteria not met'}"),
-                {
-                    "success": success,
-                    "final_status": final_status,
-                    "execution_status": execution_status,
-                    "verification_status": verification_status,
-                    "repository_health": repository_health,
-                    "warnings": warnings,
-                    "notification": notification,
-                    "verification_state": verification_state,
-                    "duration_ms": duration_ms,
-                    "total_tokens": usage_totals["total_tokens"],
-                    "llm_calls": usage_totals["calls"],
-                    "metrics": metrics,
-                }
+                metrics=metrics,
+                result=result,
+                evaluation_report=evaluation_report,
+                error_msg=error_msg,
+                workspace=workspace,
+                notification=notification,
+                usage_totals=usage_totals,
             )
 
         except asyncio.CancelledError:
-            self.db.update_run(run_id, status="cancelled", finished_at=utcnow(), error="Run cancelled by user.")
-            self.event(run_id, "run_cancelled", "Run cancelled by user", {})
+            duration_ms = round((time.perf_counter() - started) * 1000)
+            error_msg = "Run cancelled by user."
+            eval_result = evaluate_final_status(
+                dependency_status=dep_status,
+                has_manifest=True,
+                has_original_tests=False,
+                implementation_status="CANCELLED",
+                test_state="BLOCKED",
+                error_message=error_msg,
+            )
+            metrics = {
+                "duration_ms": duration_ms,
+                "inference_ms": usage_totals.get("inference_ms", 0),
+                "tool_calls": usage_totals.get("tool_calls", 0),
+                "agent_count": len(agent_outputs),
+                "agent_handoffs": tracker.handoff_count if 'tracker' in locals() else 0,
+                "dependency_status": dep_status,
+                "test_state": "BLOCKED",
+                "review_state": "BLOCKED",
+                "verification_state": "CANCELLED",
+                "final_status": eval_result["final_status"],
+                "execution_status": eval_result["execution_status"],
+                "verification_status": eval_result["verification_status"],
+                "repository_health": eval_result["repository_health"],
+                "warnings": eval_result["warnings"],
+                "notification": eval_result["notification"],
+                "verification_details": eval_result["verification_details"],
+            }
+            result = {
+                "success": False,
+                "final_status": eval_result["final_status"],
+                "execution_status": eval_result["execution_status"],
+                "verification_status": eval_result["verification_status"],
+                "error": error_msg,
+                "metrics": metrics,
+            }
+            eval_report = {
+                "run_id": run_id,
+                "success": False,
+                "final_status": eval_result["final_status"],
+                "execution_status": eval_result["execution_status"],
+                "duration_ms": duration_ms,
+                "metrics": metrics,
+                "error": error_msg,
+            }
+            self.event(run_id, "run_cancelled", error_msg, {})
+            self._finalize_run(
+                run_id,
+                status="cancelled",
+                duration_ms=duration_ms,
+                metrics=metrics,
+                result=result,
+                evaluation_report=eval_report,
+                error_msg=error_msg,
+                workspace=workspace,
+                usage_totals=usage_totals,
+            )
             raise
+
+        except (RunTimeoutError, asyncio.TimeoutError) as exc:
+            duration_ms = round((time.perf_counter() - started) * 1000)
+            error_msg = f"Run timed out: {exc}"
+            eval_result = evaluate_final_status(
+                dependency_status=dep_status,
+                has_manifest=True,
+                has_original_tests=False,
+                implementation_status="TIMED_OUT",
+                test_state="BLOCKED",
+                error_message=error_msg,
+            )
+            metrics = {
+                "duration_ms": duration_ms,
+                "inference_ms": usage_totals.get("inference_ms", 0),
+                "tool_calls": usage_totals.get("tool_calls", 0),
+                "agent_count": len(agent_outputs),
+                "agent_handoffs": tracker.handoff_count if 'tracker' in locals() else 0,
+                "dependency_status": dep_status,
+                "test_state": "BLOCKED",
+                "review_state": "BLOCKED",
+                "verification_state": "TIMED_OUT",
+                "final_status": eval_result["final_status"],
+                "execution_status": eval_result["execution_status"],
+                "verification_status": eval_result["verification_status"],
+                "repository_health": eval_result["repository_health"],
+                "warnings": eval_result["warnings"],
+                "notification": eval_result["notification"],
+                "verification_details": eval_result["verification_details"],
+            }
+            result = {
+                "success": False,
+                "final_status": eval_result["final_status"],
+                "execution_status": eval_result["execution_status"],
+                "verification_status": eval_result["verification_status"],
+                "error": error_msg,
+                "metrics": metrics,
+            }
+            eval_report = {
+                "run_id": run_id,
+                "success": False,
+                "final_status": eval_result["final_status"],
+                "execution_status": eval_result["execution_status"],
+                "duration_ms": duration_ms,
+                "metrics": metrics,
+                "error": error_msg,
+            }
+            self.event(run_id, "run_timed_out", error_msg, {"duration_ms": duration_ms})
+            self._finalize_run(
+                run_id,
+                status="timed_out",
+                duration_ms=duration_ms,
+                metrics=metrics,
+                result=result,
+                evaluation_report=eval_report,
+                error_msg=error_msg,
+                workspace=workspace,
+                usage_totals=usage_totals,
+            )
+
         except Exception as exc:
             duration_ms = round((time.perf_counter() - started) * 1000)
-            usage_totals = locals().get("executor").usage if "executor" in locals() else usage_totals
-            self.db.update_run(
+            error_msg = f"{type(exc).__name__}: {exc}"
+            eval_result = evaluate_final_status(
+                dependency_status=dep_status,
+                has_manifest=True,
+                has_original_tests=False,
+                implementation_status="FAILED",
+                test_state="BLOCKED",
+                error_message=error_msg,
+            )
+            metrics = {
+                "duration_ms": duration_ms,
+                "inference_ms": usage_totals.get("inference_ms", 0),
+                "tool_calls": usage_totals.get("tool_calls", 0),
+                "agent_count": len(agent_outputs),
+                "agent_handoffs": tracker.handoff_count if 'tracker' in locals() else 0,
+                "dependency_status": dep_status,
+                "test_state": "BLOCKED",
+                "review_state": "BLOCKED",
+                "verification_state": "FAILED",
+                "final_status": eval_result["final_status"],
+                "execution_status": eval_result["execution_status"],
+                "verification_status": eval_result["verification_status"],
+                "repository_health": eval_result["repository_health"],
+                "warnings": eval_result["warnings"],
+                "notification": eval_result["notification"],
+                "verification_details": eval_result["verification_details"],
+            }
+            result = {
+                "success": False,
+                "final_status": eval_result["final_status"],
+                "execution_status": eval_result["execution_status"],
+                "verification_status": eval_result["verification_status"],
+                "error": error_msg,
+                "metrics": metrics,
+            }
+            eval_report = {
+                "run_id": run_id,
+                "success": False,
+                "final_status": eval_result["final_status"],
+                "execution_status": eval_result["execution_status"],
+                "duration_ms": duration_ms,
+                "metrics": metrics,
+                "error": error_msg,
+            }
+            self.event(run_id, "run_error", f"Execution failed: {error_msg}", {"error": error_msg})
+            self._finalize_run(
                 run_id,
                 status="failed",
-                finished_at=utcnow(),
                 duration_ms=duration_ms,
-                total_tokens=usage_totals.get("total_tokens", 0),
-                prompt_tokens=usage_totals.get("prompt_tokens", 0),
-                completion_tokens=usage_totals.get("completion_tokens", 0),
-                llm_calls=usage_totals.get("calls", 0),
-                error=f"{type(exc).__name__}: {exc}",
+                metrics=metrics,
+                result=result,
+                evaluation_report=eval_report,
+                error_msg=error_msg,
+                workspace=workspace,
+                usage_totals=usage_totals,
             )
-            self.event(run_id, "run_error", "Execution failed", {"error": f"{type(exc).__name__}: {exc}"})
-        finally:
-            pass
 
-    async def _changed_files(self, workspace: Path) -> list[str]:
-        proc = await asyncio.create_subprocess_exec("git", "status", "--short", cwd=workspace,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-        stdout, _ = await proc.communicate()
-        return [line[3:].strip() for line in stdout.decode(errors="replace").splitlines() if len(line) > 3]
+        finally:
+            tracker.is_terminal = True
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except asyncio.CancelledError:
+                pass
+
+    async def _changed_files(self, workspace: Path, timeout: float = 15.0) -> list[str]:
+        proc = None
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "git", "status", "--short", cwd=workspace,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                start_new_session=(sys.platform != "win32")
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            return [line[3:].strip() for line in stdout.decode(errors="replace").splitlines() if len(line) > 3]
+        except (asyncio.TimeoutError, Exception):
+            if proc:
+                _kill_process_tree(proc)
+            return []
