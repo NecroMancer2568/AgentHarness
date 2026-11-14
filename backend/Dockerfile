@@ -30,7 +30,7 @@ COPY --chown=agentharness:agentharness backend/app/ /app/app/
 COPY --chown=agentharness:agentharness backend/evaluations/ /app/evaluations/
 COPY --chown=agentharness:agentharness workspace/repositories/agentharness-benchmark-fixture/ /app/workspace/repositories/agentharness-benchmark-fixture/
 COPY backend/docker-entrypoint.sh /docker-entrypoint.sh
-RUN chmod +x backend/docker-entrypoint.sh
+RUN chmod +x docker-entrypoint.sh
 
 # Create workspace directory structure and assign ownership to agentharness
 RUN mkdir -p /app/workspace/repositories /app/workspace/runs /app/workspace/venvs \
