@@ -22,12 +22,13 @@ RUN useradd -u 1000 -m -s /bin/bash agentharness
 WORKDIR /app
 
 # Install Python dependencies first for build cache efficiency
-COPY requirements.txt .
+COPY backend/requirements.txt .
 RUN pip install --no-cache-dir --default-timeout=100 --retries=10 -r requirements.txt
 
 # Copy application sources
 COPY --chown=agentharness:agentharness app/ /app/app/
 COPY --chown=agentharness:agentharness evaluations/ /app/evaluations/
+COPY --chown=agentharness:agentharness workspace/repositories/agentharness-benchmark-fixture/ /app/workspace/repositories/agentharness-benchmark-fixture/
 COPY docker-entrypoint.sh /docker-entrypoint.sh
 RUN chmod +x /docker-entrypoint.sh
 
@@ -44,7 +45,7 @@ RUN git config --global user.email "agentharness@local.internal" \
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD curl -f http://127.0.0.1:${PORT:-8000}/health || exit 1
+    CMD curl -f http://127.0.0.1:${PORT:-8000}/health || exit 1
 
 ENTRYPOINT ["/docker-entrypoint.sh"]
 
