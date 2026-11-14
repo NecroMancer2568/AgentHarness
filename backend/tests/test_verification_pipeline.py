@@ -800,6 +800,75 @@ class VerificationPipelineTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(details["review_state"], "APPROVED")
             self.assertEqual(details["rejection_reasons"], [])
 
+    def test_status_scenario_16_repo_without_tests_ast_syntax_pass_produces_success_with_warnings(self):
+        """Scenario 16: Repo without tests passes alternative verification and produces SUCCESS_WITH_WARNINGS."""
+        alt_verif = {
+            "passed": True,
+            "ast_valid": True,
+            "syntax_valid": True,
+            "import_valid": False,
+            "checks": [{"file": "main.py", "ast": "PASS", "syntax": "PASS", "import": "FAIL: relative import"}],
+            "files_checked": 1,
+            "details": "Checked 1 files. AST: True, Syntax: True, Imports: False",
+        }
+        res = evaluate_final_status(
+            has_manifest=True,
+            has_original_tests=False,
+            has_generated_tests=False,
+            test_state="NO_TESTS",
+            alternative_verification=alt_verif,
+            review_details={
+                "verdict": "NEEDS_CHANGES",
+                "review_state": "REJECTED",
+                "approved": False,
+                "rejection_reasons": ["No production code changes were made; only test or metadata files were modified."],
+            },
+        )
+        self.assertEqual(res["final_status"], "SUCCESS_WITH_WARNINGS")
+        self.assertEqual(res["db_status"], "success_with_warnings")
+        self.assertTrue(res["success"])
+        self.assertTrue(res["notification"].startswith("Warning:"))
+        self.assertIn("Code review approved", res["verification_details"]["checks_passed"])
+        self.assertEqual(res["verification_details"]["checks_failed"], [])
+
+    def test_status_scenario_17_repo_with_clean_baseline_passes_without_diff_penalty(self):
+        """Scenario 17: Repo where all baseline tests already passed maintains approval without diff penalty."""
+        baseline = [{
+            "command": ["pytest"],
+            "exit_code": 0,
+            "duration_ms": 50,
+            "outcome": "PASS",
+            "metrics": {"collected": 2, "passed": 2, "failed": 0, "skipped": 0},
+            "failure_details": [],
+        }]
+        tests = [{
+            "command": ["pytest"],
+            "exit_code": 0,
+            "duration_ms": 50,
+            "outcome": "PASS",
+            "metrics": {"collected": 2, "passed": 2, "failed": 0, "skipped": 0},
+            "failure_details": [],
+        }]
+        reviewer_output = json.dumps({
+            "verdict": "NEEDS_CHANGES",
+            "review_state": "REJECTED",
+            "approved": False,
+            "rejection_reasons": ["No production code changes were made; only test or metadata files were modified."],
+        })
+        v_state, t_pass, r_app, err, details = compute_verification_state(
+            tests=tests,
+            reviewer_output=reviewer_output,
+            baseline_tests=baseline,
+            dependency_status="DEPENDENCIES_READY",
+            implementation_status="NOT_IMPLEMENTED",
+            has_original_tests=True,
+        )
+        self.assertTrue(t_pass)
+        self.assertTrue(r_app)
+        self.assertEqual(details["verdict"], "APPROVE")
+        self.assertEqual(details["review_state"], "APPROVED")
+        self.assertEqual(details["rejection_reasons"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

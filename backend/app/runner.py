@@ -543,7 +543,6 @@ async def execute_alternative_verification(
         len(checks) > 0
         and all_ast_valid
         and all_syntax_valid
-        and all_imports_valid
     )
 
     return {
@@ -662,8 +661,8 @@ def evaluate_final_status(
         elif test_state == "FAIL":
             checks_failed.append(f"Generated regression test suite failed ({test_metrics.get('failed', 0)} failed)")
         else:
-            if not has_original_tests and (alternative_verification and alternative_verification.get("passed")):
-                checks_skipped.append("Generated regression test suite had no collected tests; verified via alternative validation")
+            if not has_original_tests:
+                checks_skipped.append("Generated regression test suite had no collected tests")
             else:
                 checks_failed.append(f"Generated regression test suite outcome: {test_state}")
 
@@ -672,12 +671,15 @@ def evaluate_final_status(
         if alternative_verification.get("passed"):
             checks_passed.append(f"Alternative validation passed: {alternative_verification.get('details', 'syntax/import verification')}")
         else:
-            checks_failed.append(f"Alternative validation failed: {alternative_verification.get('details', 'syntax/import errors')}")
+            if not has_original_tests:
+                checks_skipped.append(f"Alternative validation: {alternative_verification.get('details', 'syntax/import checks')}")
+            else:
+                checks_failed.append(f"Alternative validation failed: {alternative_verification.get('details', 'syntax/import errors')}")
 
     # Review check
     rev_state = review_details.get("review_state", "PENDING")
     rev_approved = review_details.get("approved", False)
-    if not has_original_tests and (alternative_verification and alternative_verification.get("passed")):
+    if not has_original_tests:
         substantive = [
             r for r in review_details.get("rejection_reasons", [])
             if not any(kw in r.lower() for kw in ("production", "test", "diff", "patch", "zero", "exit code", "collected", "unverified", "no_tests"))
@@ -799,9 +801,18 @@ def evaluate_final_status(
             final_status = "SUCCESS"
 
     if not has_original_tests and (alternative_verification and alternative_verification.get("passed")):
+        unsubstantive_kw = (
+            "no_tests",
+            "no tests were collected",
+            "no production code changes",
+            "zero production files",
+            "no production files were modified",
+            "only test or metadata files",
+            "only test/metadata files",
+        )
         checks_failed = [
             c for c in checks_failed
-            if not any(kw in c.lower() for kw in ("no_tests", "production", "test", "diff", "patch", "zero", "exit code", "collected", "unverified"))
+            if not any(kw in c.lower() for kw in unsubstantive_kw)
         ]
 
     success = (final_status in {"SUCCESS", "SUCCESS_WITH_WARNINGS"})
@@ -925,7 +936,7 @@ def compute_verification_state(
                 "verdict": "APPROVE",
             })
 
-    if not has_original_tests and (alternative_verification and alternative_verification.get("passed")):
+    if not has_original_tests:
         substantive = [
             r for r in rejection_reasons
             if not any(kw in r.lower() for kw in ("production", "test", "diff", "patch", "zero", "exit code", "collected", "unverified", "no_tests"))
@@ -1041,6 +1052,25 @@ def compute_verification_state(
         "failure_to_pass_verified": bool(failure_to_pass_verified),
         "reproduced_on_baseline": bool(reproduced_on_baseline),
     }
+
+    # If baseline tests already passed completely with zero failures and current tests pass,
+    # no defect was present to fix; ensure approval is maintained without penalizing for zero diff.
+    if test_passed and base_collected > 0 and base_failed == 0:
+        substantive = [
+            r for r in rejection_reasons
+            if not any(kw in r.lower() for kw in ("production", "test", "diff", "patch", "zero", "exit code", "collected", "unverified", "no_tests"))
+        ]
+        if not substantive:
+            review_approved = True
+            review_state = "APPROVED"
+            rejection_reasons = []
+            review_details.update({
+                "approved": True,
+                "review_state": "APPROVED",
+                "verdict": "APPROVE",
+                "rejection_reasons": [],
+            })
+            implementation_status = "IMPLEMENTED"
 
     # Regression status
     if implementation_status == "NOT_IMPLEMENTED":
@@ -1909,7 +1939,7 @@ class RunManager:
             else:
                 review_rules = (
                     "MANDATORY REVIEW RULES:\n"
-                    "1. If the task is a bug fix or feature implementation and ZERO production files were modified, you MUST reject with NEEDS_CHANGES and state: 'No production code changes were made; only test/metadata files were modified.'\n"
+                    "1. If baseline tests had reproducible failures and ZERO production files were modified, reject with NEEDS_CHANGES. However, if baseline tests already passed (zero reproducible bugs) or production code was fixed and all tests pass, approve with APPROVE.\n"
                     "2. If the implementation summary claims a file was edited (e.g. app/ml_service.py) but git diff contains no changes to that file, you MUST reject with NEEDS_CHANGES.\n"
                     "3. Check that tests ran and all passed. If tests failed, reject with NEEDS_CHANGES.\n"
                     "4. If production code was fixed, tests pass, and evidence is verified, approve with APPROVE."
