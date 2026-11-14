@@ -279,9 +279,66 @@ def infer_external_dependencies(workspace: Path) -> dict[str, Any]:
 
     prod_imports: set[str] = set()
     test_imports: set[str] = set()
+    prod_optional: set[str] = set()
+    test_optional: set[str] = set()
     ambiguous_imports: set[str] = set()
 
     ignored_dirs = {".git", ".venv", "venv", "venvs", "pip_cache", "site-packages", "__pycache__", "build", "dist", "node_modules"}
+
+    class ImportVisitor(ast.NodeVisitor):
+        def __init__(self):
+            self.mandatory: set[str] = set()
+            self.optional: set[str] = set()
+            self._guard_depth = 0
+
+        def visit_Try(self, node: ast.Try):
+            catches_import_error = False
+            for handler in node.handlers:
+                if handler.type is None:
+                    catches_import_error = True
+                    break
+                types: list[str] = []
+                if isinstance(handler.type, ast.Name):
+                    types.append(handler.type.id)
+                elif isinstance(handler.type, ast.Tuple):
+                    for elt in handler.type.elts:
+                        if isinstance(elt, ast.Name):
+                            types.append(elt.id)
+                if any(t in {"ImportError", "ModuleNotFoundError", "Exception", "BaseException"} for t in types):
+                    catches_import_error = True
+                    break
+
+            if catches_import_error:
+                self._guard_depth += 1
+                for stmt in node.body:
+                    self.visit(stmt)
+                self._guard_depth -= 1
+                for handler in node.handlers:
+                    self.visit(handler)
+                for stmt in node.orelse:
+                    self.visit(stmt)
+                for stmt in node.finalbody:
+                    self.visit(stmt)
+            else:
+                self.generic_visit(node)
+
+        def visit_Import(self, node: ast.Import):
+            for alias in node.names:
+                root_mod = alias.name.split(".")[0].strip()
+                if root_mod:
+                    if self._guard_depth > 0:
+                        self.optional.add(root_mod)
+                    else:
+                        self.mandatory.add(root_mod)
+
+        def visit_ImportFrom(self, node: ast.ImportFrom):
+            if node.level == 0 and node.module:
+                root_mod = node.module.split(".")[0].strip()
+                if root_mod:
+                    if self._guard_depth > 0:
+                        self.optional.add(root_mod)
+                    else:
+                        self.mandatory.add(root_mod)
 
     for py_file in workspace.rglob("*.py"):
         try:
@@ -296,20 +353,19 @@ def infer_external_dependencies(workspace: Path) -> dict[str, Any]:
         except (SyntaxError, Exception):
             continue
 
-        is_test = "test" in py_file.name.lower() or any("test" in p.lower() for p in rel_parts[:-1])
-        target_set = test_imports if is_test else prod_imports
+        visitor = ImportVisitor()
+        try:
+            visitor.visit(tree)
+        except Exception:
+            continue
 
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    root_mod = alias.name.split(".")[0].strip()
-                    if root_mod:
-                        target_set.add(root_mod)
-            elif isinstance(node, ast.ImportFrom):
-                if node.level == 0 and node.module:
-                    root_mod = node.module.split(".")[0].strip()
-                    if root_mod:
-                        target_set.add(root_mod)
+        is_test = "test" in py_file.name.lower() or any("test" in p.lower() for p in rel_parts[:-1])
+        if is_test:
+            test_imports.update(visitor.mandatory)
+            test_optional.update(visitor.optional)
+        else:
+            prod_imports.update(visitor.mandatory)
+            prod_optional.update(visitor.optional)
 
     def process_imports(mod_set: set[str]) -> tuple[set[str], set[str], set[str], set[str]]:
         ext_pkgs: set[str] = set()
@@ -345,15 +401,20 @@ def infer_external_dependencies(workspace: Path) -> dict[str, Any]:
     prod_ext, prod_loc, prod_std, prod_amb = process_imports(prod_imports)
     test_ext, test_loc, test_std, test_amb = process_imports(test_imports)
 
-    all_inferred = set(prod_ext).union(test_ext).union(doc_hints)
+    # Optional packages: imported in guarded try-except blocks, but not imported unguarded elsewhere
+    raw_optional = (prod_optional | test_optional) - prod_imports - test_imports
+    opt_ext, opt_loc, opt_std, opt_amb = process_imports(raw_optional)
+
+    all_inferred = set(prod_ext).union(test_ext)
     all_inferred = {p for p in all_inferred if p not in local_modules and p not in stdlib_modules}
 
     return {
         "inferred_packages": sorted(list(all_inferred)),
         "production_packages": sorted(list(prod_ext)),
         "test_packages": sorted(list(test_ext)),
-        "local_modules_detected": sorted(list(prod_loc.union(test_loc))),
-        "standard_library_detected": sorted(list(prod_std.union(test_std))),
+        "optional_packages": sorted(list(opt_ext)),
+        "local_modules_detected": sorted(list(prod_loc.union(test_loc).union(opt_loc))),
+        "standard_library_detected": sorted(list(prod_std.union(test_std).union(opt_std))),
         "hints_from_docs": sorted(list(doc_hints)),
         "hints_sources": hints_data["sources"],
         "ambiguous_imports": sorted(list(prod_amb.union(test_amb))),
@@ -1530,6 +1591,9 @@ async def prepare_environment(
 
     try:
         async with AsyncFileLock(lock_file, timeout=min(120.0, remaining_time())):
+            cache_invalidated = False
+            invalidation_reason = ""
+
             # Check cache validity inside the lock
             if ready_marker.is_file() and python_bin.is_file() and pytest_bin.is_file():
                 try:
@@ -1546,13 +1610,13 @@ async def prepare_environment(
                         and m_py.startswith(py_major_minor)
                         and marker_data.get("status") == "DEPENDENCIES_READY"
                     ):
-                        # Fast sanity verification
-                        rc, so, _, to = await run_process_safely(
+                        # Interpreter exists, runs, and is verified
+                        rc_py, so_py, _, _ = await run_process_safely(
                             [str(python_bin), "-c", "import sys; print('ready')"],
                             cwd=workspace,
                             timeout=5.0,
                         )
-                        if rc == 0 and "ready" in so:
+                        if rc_py == 0 and "ready" in so_py:
                             dur = round((time.perf_counter() - started) * 1000)
                             if not workspace_venv_link.exists():
                                 try:
@@ -1564,11 +1628,14 @@ async def prepare_environment(
                                 "duration_ms": dur,
                                 "python_version": selected_py_ver,
                                 "manifest_hash": manifest_hash,
+                                "cache_hit": True,
                             })
                             return {
                                 "status": "DEPENDENCIES_READY",
                                 "language": "python",
                                 "cached": True,
+                                "cache_hit": True,
+                                "cache_invalidated": False,
                                 "duration_ms": dur,
                                 "manifest_hash": manifest_hash,
                                 "declared_packages": declared_packages,
@@ -1582,6 +1649,8 @@ async def prepare_environment(
                                 "exit_code": 0,
                                 "output": "Reused cached environment matching dependency manifest hash.",
                                 "diagnostics": {
+                                    "cache_hit": True,
+                                    "cache_invalidated": False,
                                     "system_resources": get_system_resource_info(),
                                     "gpu_profile": marker_data.get("gpu_profile") or {
                                         "has_gpu": has_gpu,
@@ -1595,8 +1664,19 @@ async def prepare_environment(
                                     "inferred_packages": marker_data.get("inferred_packages", inferred_packages),
                                 },
                             }
-                except Exception:
-                    pass
+                        else:
+                            cache_invalidated = True
+                            invalidation_reason = f"Cached python interpreter failed execution check (exit code {rc_py})"
+                except Exception as e:
+                    cache_invalidated = True
+                    invalidation_reason = f"Cache metadata error: {e}"
+
+            if cache_invalidated:
+                emit("dependency_install_step", f"Invalidating corrupted virtual environment cache: {invalidation_reason}", {
+                    "reason": invalidation_reason,
+                    "venv": str(venv_dir),
+                })
+                shutil.rmtree(venv_dir, ignore_errors=True)
 
             emit("dependency_preparation_started", f"Provisioning isolated virtual environment for {repo_name}", {
                 "cache_dir": str(venv_dir),

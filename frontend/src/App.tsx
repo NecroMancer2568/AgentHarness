@@ -95,6 +95,7 @@ function App() {
 
   useEffect(() => {
     if (!selectedRunId || page !== 'live') return
+    if (selectedRun && ['succeeded', 'success_with_warnings', 'failed', 'cancelled', 'timed_out'].includes(selectedRun.status)) return
     let alive = true
     const poll = async () => {
       try {
@@ -110,6 +111,9 @@ function App() {
             ...e.events.filter((x) => !prev.some((p) => p.id === x.id)),
           ])
         }
+        if (['succeeded', 'success_with_warnings', 'failed', 'cancelled', 'timed_out'].includes(r.status)) {
+          clearInterval(timer)
+        }
       } catch {}
     }
     poll()
@@ -118,7 +122,7 @@ function App() {
       alive = false
       clearInterval(timer)
     }
-  }, [selectedRunId, page, events])
+  }, [selectedRunId, page, events, selectedRun?.status])
 
   const activeRuns = runs.filter((r) => r.status === 'running' || r.status === 'queued')
   const navigate = (next: Page) => {

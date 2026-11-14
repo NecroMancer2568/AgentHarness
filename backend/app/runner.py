@@ -1,9 +1,11 @@
 import ast
 import asyncio
 import json
+import os
 import re
 import shutil
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -393,6 +395,7 @@ async def execute_alternative_verification(
     1. Static analysis (ast.parse)
     2. Syntax validation (py_compile)
     3. Module import validation in isolated environment
+    With strict 5.0s timeouts and process tree termination.
     """
     py_files = [f for f in prod_files if f.endswith(".py")]
     if not py_files:
@@ -400,8 +403,10 @@ async def execute_alternative_verification(
             rel = p.relative_to(workspace).as_posix()
             if not is_test_or_meta_file(rel) and not rel.startswith("."):
                 py_files.append(rel)
-            if len(py_files) >= 5:
+            if len(py_files) >= 10:
                 break
+    else:
+        py_files = py_files[:10]
 
     checks: list[dict[str, Any]] = []
     all_syntax_valid = True
@@ -414,6 +419,10 @@ async def execute_alternative_verification(
         if candidate.is_file():
             python_bin = str(candidate)
 
+    safe_env = dict(os.environ)
+    cur_pythonpath = safe_env.get("PYTHONPATH", "")
+    safe_env["PYTHONPATH"] = f"{workspace}:{cur_pythonpath}".rstrip(":")
+
     for rel_path in py_files:
         full_path = workspace / rel_path
         if not full_path.is_file():
@@ -422,10 +431,12 @@ async def execute_alternative_verification(
         file_check: dict[str, Any] = {"file": rel_path}
 
         # 1. AST Parsing
+        ast_passed = False
         try:
             content = full_path.read_text(encoding="utf-8", errors="replace")
             ast.parse(content, filename=rel_path)
             file_check["ast"] = "PASS"
+            ast_passed = True
         except SyntaxError as e:
             file_check["ast"] = f"FAIL: {e}"
             all_ast_valid = False
@@ -433,42 +444,75 @@ async def execute_alternative_verification(
             file_check["ast"] = f"FAIL: {e}"
             all_ast_valid = False
 
-        # 2. Syntax validation via py_compile
+        if not ast_passed:
+            file_check["syntax"] = "SKIPPED"
+            file_check["import"] = "SKIPPED"
+            checks.append(file_check)
+            continue
+
+        # 2. Syntax validation via py_compile with strict 5.0s timeout
+        syntax_passed = False
+        proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 python_bin, "-m", "py_compile", str(full_path),
                 cwd=workspace,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=safe_env,
+                start_new_session=(sys.platform != "win32"),
             )
-            _, stderr = await proc.communicate()
+            _, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=5.0)
             if proc.returncode == 0:
                 file_check["syntax"] = "PASS"
+                syntax_passed = True
             else:
-                file_check["syntax"] = f"FAIL: {stderr.decode(errors='replace').strip()}"
+                file_check["syntax"] = f"FAIL: {stderr_b.decode(errors='replace').strip()}"
                 all_syntax_valid = False
+        except asyncio.TimeoutError:
+            if proc:
+                _kill_process_tree(proc)
+            file_check["syntax"] = "FAIL: py_compile timed out after 5.0s"
+            all_syntax_valid = False
         except Exception as e:
+            if proc:
+                _kill_process_tree(proc)
             file_check["syntax"] = f"FAIL: {e}"
             all_syntax_valid = False
 
-        # 3. Import validation
+        if not syntax_passed:
+            file_check["import"] = "SKIPPED"
+            checks.append(file_check)
+            continue
+
+        # 3. Import validation with strict 5.0s timeout
         mod_parts = list(Path(rel_path).with_suffix("").parts)
         mod_name = ".".join(mod_parts)
+        proc_imp = None
         try:
-            proc = await asyncio.create_subprocess_exec(
+            proc_imp = await asyncio.create_subprocess_exec(
                 python_bin, "-c", f"import {mod_name}",
                 cwd=workspace,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=safe_env,
+                start_new_session=(sys.platform != "win32"),
             )
-            _, stderr = await proc.communicate()
-            if proc.returncode == 0:
+            _, stderr_b = await asyncio.wait_for(proc_imp.communicate(), timeout=5.0)
+            if proc_imp.returncode == 0:
                 file_check["import"] = "PASS"
             else:
-                err_text = stderr.decode(errors="replace").strip()
+                err_text = stderr_b.decode(errors="replace").strip()
                 file_check["import"] = f"FAIL: {err_text[:200]}"
                 all_imports_valid = False
+        except asyncio.TimeoutError:
+            if proc_imp:
+                _kill_process_tree(proc_imp)
+            file_check["import"] = "FAIL: import timed out after 5.0s"
+            all_imports_valid = False
         except Exception as e:
+            if proc_imp:
+                _kill_process_tree(proc_imp)
             file_check["import"] = f"FAIL: {e}"
             all_imports_valid = False
 
@@ -1535,60 +1579,95 @@ class RunManager:
             test_files = [f for f in test_meta_files if any(ext in f for ext in (".py", ".js", ".ts", ".jsx", ".tsx")) and "test" in f.lower()]
 
             if prod_files and test_files:
-                saved_prod: dict[str, str] = {}
-                for pf in prod_files:
-                    p_path = workspace / pf
-                    if p_path.is_file():
-                        try:
-                            saved_prod[pf] = p_path.read_text(encoding="utf-8")
-                        except Exception:
-                            pass
-
-                if saved_prod:
-                    proc = None
-                    try:
-                        proc = await asyncio.create_subprocess_exec(
-                            "git", "checkout", "HEAD", "--", *list(saved_prod.keys()),
-                            cwd=workspace, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                temp_iso_dir = Path(tempfile.mkdtemp(prefix="agentharness_baseline_"))
+                used_worktree = False
+                try:
+                    # Attempt isolated git worktree first to avoid touching the live active working tree
+                    proc_wt = await asyncio.create_subprocess_exec(
+                        "git", "worktree", "add", "--detach", str(temp_iso_dir), "HEAD",
+                        cwd=workspace, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                        start_new_session=(sys.platform != "win32"),
+                    )
+                    rc_wt, _ = await asyncio.wait_for(proc_wt.communicate(), timeout=10.0)
+                    if rc_wt == 0:
+                        used_worktree = True
+                    else:
+                        # Fallback: clean temporary clone of workspace HEAD
+                        proc_cl = await asyncio.create_subprocess_exec(
+                            "git", "clone", "--shared", "--branch", "HEAD", str(workspace), str(temp_iso_dir),
+                            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
                             start_new_session=(sys.platform != "win32"),
                         )
-                        await asyncio.wait_for(proc.communicate(), timeout=15.0)
+                        await asyncio.wait_for(proc_cl.communicate(), timeout=15.0)
 
-                        repro_record = await runtime.run_test_command(
-                            runtime._detect_test_command() or ["python", "-m", "pytest", "-q"],
-                            timeout=min(self.settings.agentharness_test_timeout_seconds, 30)
-                        )
-                        if repro_record.get("outcome") == "FAIL":
-                            reproduced_on_baseline = True
-                            failure_to_pass_verified = True
-                            baseline_regression_details = repro_record.get("failure_details", [])
-                            self.event(
-                                run_id,
-                                "failure_to_pass_verified",
-                                f"Verified: Regression tests correctly fail on unpatched baseline code ({len(baseline_regression_details)} failures)",
-                                {"failure_details": baseline_regression_details}
-                            )
-                        else:
-                            self.event(
-                                run_id,
-                                "failure_to_pass_unverified",
-                                "Tests passed on unpatched baseline code (they may verify existing behavior only)",
-                                {"outcome": repro_record.get("outcome")}
-                            )
-                    except (asyncio.TimeoutError, Exception):
-                        if proc:
-                            _kill_process_tree(proc)
-                    finally:
-                        # Restore production file contents unconditionally
-                        for pf, content in saved_prod.items():
+                    # Copy modified/created test files from patched workspace into isolated baseline
+                    for tf in test_files:
+                        src_tf = workspace / tf
+                        if src_tf.is_file():
+                            dst_tf = temp_iso_dir / tf
+                            dst_tf.parent.mkdir(parents=True, exist_ok=True)
+                            dst_tf.write_text(src_tf.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
+
+                    # Link virtualenv if present
+                    if runtime.venv_path and runtime.venv_path.is_dir():
+                        iso_venv = temp_iso_dir / ".venv"
+                        if not iso_venv.exists():
                             try:
-                                (workspace / pf).write_text(content, encoding="utf-8")
-                            except Exception:
+                                iso_venv.symlink_to(runtime.venv_path, target_is_directory=True)
+                            except OSError:
                                 pass
 
-            # Re-run tests on restored patched code only if failure-to-pass check ran and verified
-            if failure_to_pass_verified:
-                await runtime.execute("run_tests", {"command": "auto"})
+                    iso_runtime = ToolRuntime(
+                        workspace=temp_iso_dir,
+                        settings=self.settings,
+                        test_command=row["test_command"],
+                        venv_path=runtime.venv_path,
+                        declared_packages=runtime.declared_packages,
+                        event_callback=None,
+                        dependency_status=runtime.dependency_status,
+                        dep_info=runtime.dep_info,
+                    )
+                    repro_record = await iso_runtime.run_test_command(
+                        iso_runtime._detect_test_command() or ["python", "-m", "pytest", "-q"],
+                        timeout=min(self.settings.agentharness_test_timeout_seconds, 30)
+                    )
+                    if repro_record.get("outcome") == "FAIL":
+                        reproduced_on_baseline = True
+                        failure_to_pass_verified = True
+                        baseline_regression_details = repro_record.get("failure_details", [])
+                        self.event(
+                            run_id,
+                            "failure_to_pass_verified",
+                            f"Verified: Regression tests correctly fail on unpatched baseline code ({len(baseline_regression_details)} failures)",
+                            {"failure_details": baseline_regression_details}
+                        )
+                    else:
+                        self.event(
+                            run_id,
+                            "failure_to_pass_unverified",
+                            "Tests passed on unpatched baseline code (they may verify existing behavior only)",
+                            {"outcome": repro_record.get("outcome")}
+                        )
+                except Exception as e:
+                    self.event(
+                        run_id,
+                        "failure_to_pass_skipped",
+                        f"Isolated failure-to-pass verification could not be completed: {e}",
+                        {"error": str(e)}
+                    )
+                finally:
+                    # Clean up isolated worktree or temporary directory safely
+                    if used_worktree:
+                        try:
+                            proc_rm = await asyncio.create_subprocess_exec(
+                                "git", "worktree", "remove", "--force", str(temp_iso_dir),
+                                cwd=workspace, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                                start_new_session=(sys.platform != "win32"),
+                            )
+                            await asyncio.wait_for(proc_rm.communicate(), timeout=10.0)
+                        except Exception:
+                            pass
+                    shutil.rmtree(temp_iso_dir, ignore_errors=True)
 
             # Check if alternative verification is needed (when no tests were run or tests produced NO_TESTS/BLOCKED)
             last_test_outcome = runtime.test_results[-1].get("outcome") if runtime.test_results else "NO_TESTS"

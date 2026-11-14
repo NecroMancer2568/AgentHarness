@@ -1051,6 +1051,67 @@ class DependencyManagementTests(unittest.TestCase):
         self.assertIn("pandas", s4["inferred_packages"])
         self.assertFalse(t4["has_existing_tests"])
 
+    def test_readme_hints_recorded_in_hints_only_not_inferred_packages(self):
+        workspace = self.tmp_dir / "readme_hints_repo"
+        workspace.mkdir(parents=True, exist_ok=True)
+        (workspace / "README.md").write_text("Install the following optional dependencies:\n```\npip install torch tensorflow\n```\n")
+        (workspace / "main.py").write_text("import requests\n")
+        res = infer_external_dependencies(workspace)
+        self.assertIn("requests", res["inferred_packages"])
+        self.assertIn("torch", res["hints_from_docs"])
+        self.assertIn("tensorflow", res["hints_from_docs"])
+        # Crucial Phase 2 requirement: hints from docs must NOT be added to inferred_packages
+        self.assertNotIn("torch", res["inferred_packages"])
+        self.assertNotIn("tensorflow", res["inferred_packages"])
+
+    def test_guarded_optional_imports_isolated_from_mandatory_packages(self):
+        workspace = self.tmp_dir / "guarded_repo"
+        workspace.mkdir(parents=True, exist_ok=True)
+        (workspace / "service.py").write_text(
+            "import requests\n"
+            "try:\n"
+            "    import uvloop\n"
+            "except ImportError:\n"
+            "    uvloop = None\n"
+            "try:\n"
+            "    import orjson\n"
+            "except (ImportError, ModuleNotFoundError):\n"
+            "    orjson = None\n"
+        )
+        res = infer_external_dependencies(workspace)
+        self.assertIn("requests", res["inferred_packages"])
+        self.assertIn("uvloop", res["optional_packages"])
+        self.assertIn("orjson", res["optional_packages"])
+        # Guarded imports should NOT be treated as mandatory inferred packages
+        self.assertNotIn("uvloop", res["inferred_packages"])
+        self.assertNotIn("orjson", res["inferred_packages"])
+
+    def test_alternative_verification_static_first_skips_downstream_checks(self):
+        workspace = self.tmp_dir / "ast_first_repo"
+        workspace.mkdir(parents=True, exist_ok=True)
+        (workspace / "syntax_error.py").write_text("def broken(:\n    return 42\n")
+        res = asyncio.run(execute_alternative_verification(workspace, ["syntax_error.py"]))
+        self.assertFalse(res["passed"])
+        self.assertFalse(res["ast_valid"])
+        self.assertEqual(len(res["checks"]), 1)
+        check = res["checks"][0]
+        self.assertTrue(check["ast"].startswith("FAIL"))
+        self.assertEqual(check["syntax"], "SKIPPED")
+        self.assertEqual(check["import"], "SKIPPED")
+
+    def test_alternative_verification_caps_files_checked_at_ten(self):
+        workspace = self.tmp_dir / "cap_files_repo"
+        workspace.mkdir(parents=True, exist_ok=True)
+        files = []
+        for i in range(15):
+            fname = f"module_{i}.py"
+            (workspace / fname).write_text(f"def func_{i}(): return {i}\n")
+            files.append(fname)
+        res = asyncio.run(execute_alternative_verification(workspace, files))
+        self.assertTrue(res["passed"])
+        self.assertLessEqual(len(res["checks"]), 10)
+        self.assertLessEqual(res["files_checked"], 10)
+
 
 if __name__ == "__main__":
     unittest.main()
