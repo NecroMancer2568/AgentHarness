@@ -761,12 +761,6 @@ def evaluate_final_status(
     if verification_status == "PARTIAL_VERIFICATION" and not tests_missing and not (dependency_status and dependency_status != "DEPENDENCIES_READY"):
         warnings.append("Verification was partial: not all standard verification stages could be performed.")
 
-    notification: str | None = None
-    if warnings:
-        notification = "Execution completed with warnings: " + "; ".join(warnings)
-    elif structural_suggestions:
-        notification = "Execution completed successfully. Suggestion: " + "; ".join(structural_suggestions)
-
     # 6. Final Status
     if execution_status in {"BLOCKED", "NOT_COMPLETED", "FAILED", "TIMED_OUT", "CANCELLED"}:
         final_status = "FAILED"
@@ -791,6 +785,18 @@ def evaluate_final_status(
         db_status = "success_with_warnings"
     else:
         db_status = "failed"
+
+    # 7. Notification Generation Aligned with Final Status
+    notification: str | None = None
+    if final_status == "FAILED":
+        failure_reasons = checks_failed if checks_failed else ([error_message] if error_message else ["Verification failed."])
+        notification = "Execution failed: " + "; ".join(failure_reasons)
+    elif final_status == "SUCCESS_WITH_WARNINGS":
+        notification = "Execution completed with warnings: " + "; ".join(warnings)
+    elif structural_suggestions:
+        notification = "Execution completed successfully. Suggestion: " + "; ".join(structural_suggestions)
+    else:
+        notification = None
 
     return {
         "final_status": final_status,

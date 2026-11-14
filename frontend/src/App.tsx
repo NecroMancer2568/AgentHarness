@@ -21,6 +21,7 @@ import {
   Timer,
   Trash2,
   UploadCloud,
+  XCircle,
   Zap,
 } from 'lucide-react'
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
@@ -954,6 +955,7 @@ function LiveExecution({
   const notification = run.notification || result.notification
   const verificationDetails = result.verification_details || {}
   const checksPassed: string[] = verificationDetails.checks_passed || []
+  const checksFailed: string[] = verificationDetails.checks_failed || []
   const checksSkipped: string[] = verificationDetails.checks_skipped || []
 
   return (
@@ -1007,7 +1009,46 @@ function LiveExecution({
         </span>
       </div>
 
-      {(warnings.length > 0 || run.status === 'success_with_warnings') && (
+      {run.status === 'failed' && (
+        <div
+          className="c"
+          style={{
+            border: '1px solid rgba(239, 68, 68, 0.4)',
+            background: 'rgba(239, 68, 68, 0.08)',
+            padding: '16px 22px',
+            marginBottom: 20,
+            borderRadius: 12,
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, color: '#f87171', fontWeight: 600, fontSize: 14 }}>
+            <XCircle size={18} />
+            <span>{notification || run.error || 'Execution Failed'}</span>
+          </div>
+          {checksFailed.length > 0 && (
+            <ul style={{ margin: '10px 0 0 24px', padding: 0, fontSize: 13, color: 'rgba(255,255,255,0.85)' }}>
+              {checksFailed.map((f: string, idx: number) => (
+                <li key={idx} style={{ marginBottom: 4 }}>{f}</li>
+              ))}
+            </ul>
+          )}
+          {(checksPassed.length > 0 || checksSkipped.length > 0) && (
+            <div style={{ display: 'flex', gap: 16, marginTop: 12, fontSize: 12, flexWrap: 'wrap' }}>
+              {checksPassed.length > 0 && (
+                <div style={{ color: '#4ade80' }}>
+                  ✓ Passed ({checksPassed.length}): {checksPassed.join(', ')}
+                </div>
+              )}
+              {checksSkipped.length > 0 && (
+                <div style={{ color: 'rgba(255,255,255,0.6)' }}>
+                  ⊘ Skipped ({checksSkipped.length}): {checksSkipped.join(', ')}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {run.status === 'success_with_warnings' && (
         <div
           className="c"
           style={{

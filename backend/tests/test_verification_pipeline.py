@@ -536,6 +536,7 @@ class VerificationPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(res["repository_health"], "MISSING_MANIFEST")
         self.assertFalse(res["success"])
         self.assertEqual(res["db_status"], "failed")
+        self.assertTrue(res["notification"].startswith("Execution failed:"))
 
     def test_status_scenario_4_missing_existing_tests_with_generated_tests(self):
         """Scenario 4: Missing existing tests with successful generated regression tests -> SUCCESS_WITH_WARNINGS."""
@@ -610,6 +611,7 @@ class VerificationPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(res["verification_status"], "BLOCKED")
         self.assertFalse(res["success"])
         self.assertEqual(res["db_status"], "failed")
+        self.assertTrue(res["notification"].startswith("Execution failed:"))
 
     def test_status_scenario_8_generated_regression_tests_failing(self):
         """Scenario 8: Generated regression tests failing -> FAILED."""
@@ -625,6 +627,7 @@ class VerificationPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(res["verification_status"], "FAILED_VERIFICATION")
         self.assertFalse(res["success"])
         self.assertEqual(res["db_status"], "failed")
+        self.assertTrue(res["notification"].startswith("Execution failed:"))
         self.assertIn("Generated regression test suite failed (1 failed)", res["verification_details"]["checks_failed"])
 
     def test_status_scenario_9_existing_regression_tests_failing(self):
@@ -640,6 +643,7 @@ class VerificationPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(res["verification_status"], "FAILED_VERIFICATION")
         self.assertFalse(res["success"])
         self.assertEqual(res["db_status"], "failed")
+        self.assertTrue(res["notification"].startswith("Execution failed:"))
         self.assertIn("Original test suite failed (2 failed)", res["verification_details"]["checks_failed"])
 
     def test_status_scenario_10_code_review_rejection(self):
@@ -654,6 +658,7 @@ class VerificationPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(res["final_status"], "FAILED")
         self.assertFalse(res["success"])
         self.assertEqual(res["db_status"], "failed")
+        self.assertTrue(res["notification"].startswith("Execution failed:"))
         self.assertTrue(any("Code review rejected" in c for c in res["verification_details"]["checks_failed"]))
 
     def test_status_scenario_11_critical_execution_failure_not_implemented(self):
@@ -669,6 +674,7 @@ class VerificationPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(res["execution_status"], "NOT_COMPLETED")
         self.assertFalse(res["success"])
         self.assertEqual(res["db_status"], "failed")
+        self.assertTrue(res["notification"].startswith("Execution failed:"))
 
     def test_status_scenario_12_successful_execution_with_incomplete_verification(self):
         """Scenario 12: Successful execution with zero verification performed -> FAILED."""
@@ -684,6 +690,7 @@ class VerificationPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(res["verification_status"], "UNVERIFIED")
         self.assertFalse(res["success"])
         self.assertEqual(res["db_status"], "failed")
+        self.assertTrue(res["notification"].startswith("Execution failed:"))
 
     def test_status_scenario_13_conflicting_status_signals_from_agents(self):
         """Scenario 13: Conflicting status signals from agents -> Evaluator enforces ground truth."""
