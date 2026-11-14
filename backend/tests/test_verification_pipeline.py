@@ -412,6 +412,69 @@ class VerificationPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(details["baseline_comparison"]["failure_to_pass_verified"])
         self.assertTrue(details["baseline_comparison"]["reproduced_on_baseline"])
 
+    def test_tool_call_xml_in_reviewer_output_parsed_as_pending(self):
+        """Tool-call XML markup from LLMs should be parsed as PENDING rather than a hard code rejection."""
+        xml_tool_call = (
+            "<tool_call>\n"
+            "<function=read_file>\n"
+            "<parameter=path>\n"
+            "src/miniapp.py\n"
+            "</parameter>\n"
+            "</function>\n"
+            "</tool_call>"
+        )
+        parsed = parse_reviewer_verdict(xml_tool_call)
+        self.assertEqual(parsed["verdict"], "PENDING")
+        self.assertEqual(parsed["review_state"], "PENDING")
+        self.assertFalse(parsed["approved"])
+
+    def test_ground_truth_fallback_approves_when_tests_pass_and_reviewer_emits_tool_call(self):
+        """When all tests pass, production code is changed, and failure-to-pass is verified, procedural reviewer issues do not block verification."""
+        pass_test = [{"command": ["pytest"], "outcome": "PASS", "passed": True, "metrics": {"collected": 5, "passed": 5}}]
+        xml_tool_call = (
+            "<tool_call>\n"
+            "<function=read_file>\n"
+            "<parameter=path>\n"
+            "src/miniapp.py\n"
+            "</parameter>\n"
+            "</function>\n"
+            "</tool_call>"
+        )
+        verdict, tp, ra, err, details = compute_verification_state(
+            pass_test,
+            xml_tool_call,
+            implementation_status="IMPLEMENTED",
+            failure_to_pass_verified=True,
+            reproduced_on_baseline=True,
+        )
+        self.assertEqual(verdict, "PASS")
+        self.assertTrue(tp)
+        self.assertTrue(ra)
+        self.assertEqual(details["review_state"], "APPROVED")
+        self.assertTrue(details["test_evidence_verified"])
+
+    def test_ground_truth_does_not_override_substantive_rejection(self):
+        """Ground-truth fallback must never override explicit, substantive code reviewer rejections."""
+        pass_test = [{"command": ["pytest"], "outcome": "PASS", "passed": True, "metrics": {"collected": 5, "passed": 5}}]
+        substantive_rejection = (
+            "VERDICT: NEEDS_CHANGES\n"
+            "REJECTION_REASONS:\n"
+            "- Critical edge case with zero denominator causes undefined behavior\n"
+            "- Potential SQL injection in query builder"
+        )
+        verdict, tp, ra, err, details = compute_verification_state(
+            pass_test,
+            substantive_rejection,
+            implementation_status="IMPLEMENTED",
+            failure_to_pass_verified=True,
+            reproduced_on_baseline=True,
+        )
+        self.assertEqual(verdict, "PARTIAL")
+        self.assertTrue(tp)
+        self.assertFalse(ra)
+        self.assertEqual(details["review_state"], "REJECTED")
+        self.assertIn("Critical edge case with zero denominator", details["rejection_reasons"][0])
+
     # --- 14 Intelligent Completion Status & Warning Tests ---
 
     def test_status_scenario_1_complete_repo_with_passing_tests(self):

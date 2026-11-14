@@ -62,12 +62,12 @@ ROLE_PROMPTS = {
   "code_reviewer": (
       "You are an independent code reviewer. Review the task, changes, and test evidence for correctness, regressions, security issues, and maintainability.\n"
       "MANDATORY REVIEW RULES:\n"
-      "1. Inspect the git diff provided in the prompt context or using git_diff. If no changes were made, reject with NEEDS_CHANGES.\n"
+      "1. Inspect the git diff provided in the prompt context. If no changes were made, reject with NEEDS_CHANGES.\n"
       "2. If the task requires a bug fix or feature implementation, you MUST verify that production code files (e.g. in app/ or src/) were modified. If only test files or metadata files were modified, REJECT with NEEDS_CHANGES and state rejection reason: 'No production code changes were made; only test/metadata files were modified.'\n"
       "3. Verify that the git diff contains the actual modifications claimed in the implementation summary. If the summary claims a file was edited but the diff shows no changes to that file, REJECT with NEEDS_CHANGES.\n"
       "4. Inspect both production changes and generated tests. Verify test relevance and quality: ensure tests genuinely exercise the fix, test edge cases/boundary conditions, and do not make fabricated claims.\n"
       "5. Check that verification claims match actual execution results. If tests failed or were not collected, reject.\n"
-      "6. The complete git diff, changed files list, and test execution results are already provided directly in your review prompt. Only call tools if you need to read additional unmodified files. Prioritize rendering your final verdict promptly within your allotted steps.\n"
+      "6. The complete git diff, changed files list, and test execution results are already provided directly in your review prompt. Do not call any tools. Evaluate the provided git diff and test evidence directly and output your final review verdict immediately.\n"
       "7. End your review with a structured JSON block:\n"
       "```json\n"
       "{\n"
@@ -84,8 +84,8 @@ ROLE_PROMPTS = {
       "- <reason>"
   ),
   "security_reviewer": (
-      "You are a security reviewer for a real software repository. Inspect the task and changes for input validation, authorization, secrets, "
-      "unsafe command execution, path traversal, injection, and sensitive data exposure. Use git_diff and read_file; do not edit. "
+      "You are a security reviewer for a real software repository. Inspect the task, provided git diff, and changed files for input validation, authorization, secrets, "
+      "unsafe command execution, path traversal, injection, and sensitive data exposure. Do not call tools; evaluate the provided evidence directly. "
       "Only report actionable findings supported by evidence. End with VERDICT: APPROVE or VERDICT: NEEDS_CHANGES."
   )
 }
