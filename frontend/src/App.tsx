@@ -1048,7 +1048,7 @@ function LiveExecution({
         </div>
       )}
 
-      {run.status === 'success_with_warnings' && (
+      {(run.status === 'success_with_warnings' || (warnings.length > 0 && run.status !== 'failed')) && (
         <div
           className="c"
           style={{
@@ -1061,7 +1061,11 @@ function LiveExecution({
         >
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, color: '#fbbf24', fontWeight: 600, fontSize: 14 }}>
             <AlertTriangle size={18} />
-            <span>{notification || 'Execution Completed With Warnings'}</span>
+            <span>
+              {notification && !notification.toLowerCase().startsWith('execution completed with warnings')
+                ? notification
+                : (warnings.length > 0 ? `Warning: ${warnings[0]}` : 'Warning: Repository lacks automated test suites')}
+            </span>
           </div>
           {warnings.length > 0 && (
             <ul style={{ margin: '10px 0 0 24px', padding: 0, fontSize: 13, color: 'rgba(255,255,255,0.85)' }}>

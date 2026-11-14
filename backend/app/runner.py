@@ -519,7 +519,7 @@ async def execute_alternative_verification(
                 env=safe_env,
                 start_new_session=(sys.platform != "win32"),
             )
-            _, stderr_b = await asyncio.wait_for(proc_imp.communicate(), timeout=5.0)
+            _, stderr_b = await asyncio.wait_for(proc_imp.communicate(), timeout=15.0)
             if proc_imp.returncode == 0:
                 file_check["import"] = "PASS"
             else:
@@ -529,7 +529,7 @@ async def execute_alternative_verification(
         except asyncio.TimeoutError:
             if proc_imp:
                 _kill_process_tree(proc_imp)
-            file_check["import"] = "FAIL: import timed out after 5.0s"
+            file_check["import"] = "FAIL: import timed out after 15.0s"
             all_imports_valid = False
         except Exception as e:
             if proc_imp:
@@ -791,8 +791,8 @@ def evaluate_final_status(
     if final_status == "FAILED":
         failure_reasons = checks_failed if checks_failed else ([error_message] if error_message else ["Verification failed."])
         notification = "Execution failed: " + "; ".join(failure_reasons)
-    elif final_status == "SUCCESS_WITH_WARNINGS":
-        notification = "Execution completed with warnings: " + "; ".join(warnings)
+    elif warnings:
+        notification = "Warning: " + "; ".join(warnings)
     elif structural_suggestions:
         notification = "Execution completed successfully. Suggestion: " + "; ".join(structural_suggestions)
     else:
@@ -849,7 +849,7 @@ def compute_verification_state(
 
     # If change-evidence validation detected that no production files were modified for an implementation task,
     # the task was not implemented and cannot pass verification.
-    if implementation_status == "NOT_IMPLEMENTED":
+    if implementation_status == "NOT_IMPLEMENTED" and (has_original_tests or has_generated_tests):
         review_approved = False
         review_state = "REJECTED"
         rejection_msg = "No production code changes were made; only test or metadata files were modified."

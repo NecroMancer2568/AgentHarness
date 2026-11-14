@@ -45,23 +45,32 @@ export function StatCard({
 }
 
 export function StatusPill({ status }: { status: string }) {
-  const s = status.toLowerCase()
-  const Icon =
-    s === 'succeeded' || s === 'pass' || s === 'approved' || s === 'success'
-      ? CheckCircle2
-      : s === 'success_with_warnings' || s === 'partial_pass' || s === 'partial'
-      ? AlertTriangle
-      : s === 'failed' || s === 'fail' || s === 'rejected'
-      ? XCircle
-      : s === 'running'
-      ? Loader2
-      : s === 'timed_out' || s === 'queued'
-      ? Clock3
-      : AlertCircle
+  const s = String(status || '').toLowerCase()
+  const isSuccess =
+    s === 'succeeded' || s === 'pass' || s === 'approved' || s === 'success' || s === 'success_with_warnings'
+  const Icon = isSuccess
+    ? CheckCircle2
+    : s === 'partial_pass' || s === 'partial'
+    ? AlertTriangle
+    : s === 'failed' || s === 'fail' || s === 'rejected'
+    ? XCircle
+    : s === 'running'
+    ? Loader2
+    : s === 'timed_out' || s === 'queued'
+    ? Clock3
+    : AlertCircle
+
+  const label =
+    s === 'success_with_warnings' || s === 'succeeded' || s === 'success'
+      ? 'SUCCESS'
+      : (status || '').replace(/_/g, ' ').toUpperCase()
+
+  const pillClass = isSuccess ? 'pl succeeded' : `pl ${s}`
+
   return (
-    <span className={`pl ${s}`}>
+    <span className={pillClass}>
       <Icon size={13} className={s === 'running' ? 'spin' : ''} />
-      {status.replace(/_/g, ' ').toUpperCase()}
+      {label}
     </span>
   )
 }
