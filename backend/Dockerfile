@@ -22,14 +22,14 @@ RUN useradd -u 1000 -m -s /bin/bash agentharness
 WORKDIR /app
 
 # Install Python dependencies first for build cache efficiency
-COPY backend/requirements.txt .
+COPY requirements.txt .
 RUN pip install --no-cache-dir --default-timeout=100 --retries=10 -r requirements.txt
 
 # Copy application sources
-COPY --chown=agentharness:agentharness app/ /app/app/
-COPY --chown=agentharness:agentharness evaluations/ /app/evaluations/
+COPY --chown=agentharness:agentharness backend/app/ /app/app/
+COPY --chown=agentharness:agentharness backend/evaluations/ /app/evaluations/
 COPY --chown=agentharness:agentharness workspace/repositories/agentharness-benchmark-fixture/ /app/workspace/repositories/agentharness-benchmark-fixture/
-COPY docker-entrypoint.sh /docker-entrypoint.sh
+COPY backend/docker-entrypoint.sh /docker-entrypoint.sh
 RUN chmod +x /docker-entrypoint.sh
 
 # Create workspace directory structure and assign ownership to agentharness
