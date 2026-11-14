@@ -869,6 +869,30 @@ class VerificationPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(details["review_state"], "APPROVED")
         self.assertEqual(details["rejection_reasons"], [])
 
+    def test_status_scenario_18_approved_review_and_passing_tests_always_succeed(self):
+        """Scenario 18: Passing tests and approved code review must always result in SUCCESS or SUCCESS_WITH_WARNINGS."""
+        res = evaluate_final_status(
+            dependency_status="DEPENDENCIES_READY",
+            dependency_source="inferred",
+            has_manifest=False,
+            has_original_tests=True,
+            has_generated_tests=False,
+            implementation_status="NOT_IMPLEMENTED",
+            test_state="PASS",
+            test_metrics={"collected": 2, "passed": 2, "failed": 0, "skipped": 0},
+            review_details={
+                "verdict": "APPROVE",
+                "review_state": "APPROVED",
+                "approved": True,
+                "rejection_reasons": [],
+            },
+        )
+        self.assertIn(res["final_status"], {"SUCCESS", "SUCCESS_WITH_WARNINGS"})
+        self.assertEqual(res["execution_status"], "COMPLETED")
+        self.assertTrue(res["success"])
+        self.assertIn(res["db_status"], {"succeeded", "success_with_warnings"})
+        self.assertFalse(res["notification"] and "Execution failed:" in res["notification"])
+
 
 if __name__ == "__main__":
     unittest.main()

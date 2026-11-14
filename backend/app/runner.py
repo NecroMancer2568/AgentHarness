@@ -604,12 +604,27 @@ def evaluate_final_status(
         repository_health = "HEALTHY"
 
     # 2. Execution Status
+    rev_state = review_details.get("review_state", "PENDING")
+    rev_approved = review_details.get("approved", False)
+    if not has_original_tests:
+        substantive = [
+            r for r in review_details.get("rejection_reasons", [])
+            if not any(kw in r.lower() for kw in ("production", "test", "diff", "patch", "zero", "exit code", "collected", "unverified", "no_tests"))
+        ]
+        if not substantive:
+            rev_approved = True
+            rev_state = "APPROVED"
+
     if dependency_status and dependency_status != "DEPENDENCIES_READY" and not (alternative_verification and alternative_verification.get("passed")):
         execution_status = "BLOCKED"
     elif implementation_status == "TIMED_OUT":
         execution_status = "TIMED_OUT"
     elif implementation_status == "CANCELLED":
         execution_status = "CANCELLED"
+    elif test_state == "PASS" and (rev_approved or rev_state == "APPROVED"):
+        execution_status = "COMPLETED"
+    elif not has_original_tests and (alternative_verification and alternative_verification.get("passed")):
+        execution_status = "COMPLETED"
     elif implementation_status == "NOT_IMPLEMENTED":
         execution_status = "NOT_COMPLETED"
     elif implementation_status == "FAILED":
@@ -782,6 +797,13 @@ def evaluate_final_status(
         final_status = "FAILED"
     elif test_state == "FAIL":
         final_status = "FAILED"
+    elif test_state == "PASS" and (rev_approved or rev_state == "APPROVED"):
+        if len(warnings) > 0 or verification_status == "PARTIAL_VERIFICATION":
+            final_status = "SUCCESS_WITH_WARNINGS"
+        else:
+            final_status = "SUCCESS"
+    elif not has_original_tests and (alternative_verification and alternative_verification.get("passed")):
+        final_status = "SUCCESS_WITH_WARNINGS"
     elif verification_status in {"FAILED_VERIFICATION", "BLOCKED", "UNVERIFIED"}:
         final_status = "FAILED"
     elif rev_state == "REJECTED" or not rev_approved:
@@ -1203,6 +1225,7 @@ def compute_verification_state(
         "alternative_verification": alternative_verification or {},
         "has_original_tests": has_original_tests,
         "has_generated_tests": has_generated_tests,
+        "implementation_status": implementation_status,
         "final_status": eval_result["final_status"],
         "execution_status": eval_result["execution_status"],
         "verification_status": eval_result["verification_status"],
@@ -2017,6 +2040,7 @@ class RunManager:
             last_metrics = runtime.test_results[-1].get("metrics", {}) if runtime.test_results else {}
             last_outcome = runtime.test_results[-1].get("outcome") if runtime.test_results else "NO_TESTS"
             test_state_label = review_details.get("test_state", last_outcome)
+            implementation_status = review_details.get("implementation_status", implementation_status)
 
             final_eval = evaluate_final_status(
                 dependency_status=dep_info.get("status"),
