@@ -687,8 +687,6 @@ def evaluate_final_status(
     elif test_state == "PASS":
         if not has_original_tests and has_generated_tests:
             verification_status = "PARTIAL_VERIFICATION"
-        elif repository_health != "HEALTHY":
-            verification_status = "PARTIAL_VERIFICATION"
         elif dependency_status and dependency_status != "DEPENDENCIES_READY":
             verification_status = "PARTIAL_VERIFICATION"
         else:
@@ -701,20 +699,16 @@ def evaluate_final_status(
     else:
         verification_status = "FAILED_VERIFICATION"
 
-    # 5. Warnings and Notifications
+    # 5. Warnings, Structural Suggestions, and Notifications
     warnings: list[str] = []
-    if dependency_status and dependency_status != "DEPENDENCIES_READY":
+    structural_suggestions: list[str] = []
+
+    if dependency_status and dependency_status not in {"DEPENDENCIES_READY", None}:
         warnings.append(
             f"Repository dependencies could not be fully prepared ({dependency_status}): {error_message or 'Dependencies absent'}. "
             "Verification relied on available alternative analysis."
         )
-    if manifest_missing:
-        if dependency_source == "inferred":
-            warnings.append(f"Repository lacks a dependency manifest. {len(inferred_packages)} packages were inferred from source code.")
-        else:
-            warnings.append("Repository lacks a dependency manifest.")
-    if ambiguous_imports:
-        warnings.append(f"Ambiguous or unmapped imports detected: {', '.join(ambiguous_imports[:5])}.")
+
     if tests_missing:
         if has_generated_tests and test_state == "PASS":
             warnings.append("Repository lacked existing tests. Verification relied on generated regression tests.")
@@ -722,12 +716,42 @@ def evaluate_final_status(
             warnings.append("Repository lacked existing tests. Verification relied on alternative syntax and import checks.")
         else:
             warnings.append("Repository lacks automated test suites.")
-    if verification_status == "PARTIAL_VERIFICATION" and not tests_missing and not manifest_missing and not (dependency_status and dependency_status != "DEPENDENCIES_READY"):
+
+    if manifest_missing:
+        if tests_missing:
+            if dependency_source == "inferred":
+                warnings.append(f"Repository lacks a dependency manifest. {len(inferred_packages)} packages were inferred from source code.")
+            else:
+                warnings.append("Repository lacks a dependency manifest.")
+        else:
+            if dependency_source == "inferred":
+                structural_suggestions.append(
+                    f"Repository lacks a dependency manifest ({len(inferred_packages)} packages were inferred from source code). "
+                    "Consider adding a requirements.txt or pyproject.toml to properly structure your dependencies."
+                )
+            else:
+                structural_suggestions.append(
+                    "Repository lacks a dependency manifest. "
+                    "Consider adding a requirements.txt or pyproject.toml to properly structure your dependencies."
+                )
+
+    if ambiguous_imports:
+        if tests_missing:
+            warnings.append(f"Ambiguous or unmapped imports detected: {', '.join(ambiguous_imports[:5])}.")
+        else:
+            structural_suggestions.append(
+                f"Ambiguous or unmapped imports detected: {', '.join(ambiguous_imports[:5])}. "
+                "Consider specifying these dependencies in a manifest."
+            )
+
+    if verification_status == "PARTIAL_VERIFICATION" and not tests_missing and not (dependency_status and dependency_status != "DEPENDENCIES_READY"):
         warnings.append("Verification was partial: not all standard verification stages could be performed.")
 
     notification: str | None = None
     if warnings:
         notification = "Execution completed with warnings: " + "; ".join(warnings)
+    elif structural_suggestions:
+        notification = "Execution completed successfully. Suggestion: " + "; ".join(structural_suggestions)
 
     # 6. Final Status
     if execution_status in {"BLOCKED", "NOT_COMPLETED", "FAILED", "TIMED_OUT", "CANCELLED"}:
@@ -737,7 +761,7 @@ def evaluate_final_status(
     elif rev_state == "REJECTED" or not rev_approved:
         final_status = "FAILED"
     else:
-        if repository_health != "HEALTHY" or verification_status == "PARTIAL_VERIFICATION" or len(warnings) > 0:
+        if len(warnings) > 0 or verification_status == "PARTIAL_VERIFICATION":
             final_status = "SUCCESS_WITH_WARNINGS"
         else:
             final_status = "SUCCESS"
@@ -762,6 +786,7 @@ def evaluate_final_status(
         "success": success,
         "db_status": db_status,
         "warnings": warnings,
+        "structural_suggestions": structural_suggestions,
         "notification": notification,
         "verification_details": {
             "checks_passed": checks_passed,
@@ -848,6 +873,7 @@ def compute_verification_state(
                 "verification_status": eval_result["verification_status"],
                 "repository_health": eval_result["repository_health"],
                 "warnings": eval_result["warnings"],
+                "structural_suggestions": eval_result.get("structural_suggestions", []),
                 "notification": eval_result["notification"],
                 "verification_details": eval_result["verification_details"],
             })
@@ -1822,6 +1848,7 @@ class RunManager:
             verification_status = final_eval["verification_status"]
             repository_health = final_eval["repository_health"]
             warnings = final_eval["warnings"]
+            structural_suggestions = final_eval.get("structural_suggestions", [])
             notification = final_eval["notification"]
             verification_details = final_eval["verification_details"]
             success = final_eval["success"]
@@ -1833,6 +1860,7 @@ class RunManager:
                 "verification_status": verification_status,
                 "repository_health": repository_health,
                 "warnings": warnings,
+                "structural_suggestions": structural_suggestions,
                 "notification": notification,
                 "verification_details": verification_details,
             })
@@ -1869,6 +1897,7 @@ class RunManager:
                 "verification_status": verification_status,
                 "repository_health": repository_health,
                 "warnings": warnings,
+                "structural_suggestions": structural_suggestions,
                 "notification": notification,
                 "verification_details": verification_details,
                 "regression_status": review_details.get("regression_status", "NO_REGRESSION"),
@@ -1902,6 +1931,7 @@ class RunManager:
                 "verification_status": verification_status,
                 "repository_health": repository_health,
                 "warnings": warnings,
+                "structural_suggestions": structural_suggestions,
                 "notification": notification,
                 "verification_details": verification_details,
                 "test_state": test_state_label,
@@ -1936,6 +1966,7 @@ class RunManager:
                 "verification_status": verification_status,
                 "repository_health": repository_health,
                 "warnings": warnings,
+                "structural_suggestions": structural_suggestions,
                 "notification": notification,
                 "verification_details": verification_details,
                 "success": success,
@@ -2004,6 +2035,7 @@ class RunManager:
                 "verification_status": eval_result["verification_status"],
                 "repository_health": eval_result["repository_health"],
                 "warnings": eval_result["warnings"],
+                "structural_suggestions": eval_result.get("structural_suggestions", []),
                 "notification": eval_result["notification"],
                 "verification_details": eval_result["verification_details"],
             }
@@ -2065,6 +2097,7 @@ class RunManager:
                 "verification_status": eval_result["verification_status"],
                 "repository_health": eval_result["repository_health"],
                 "warnings": eval_result["warnings"],
+                "structural_suggestions": eval_result.get("structural_suggestions", []),
                 "notification": eval_result["notification"],
                 "verification_details": eval_result["verification_details"],
             }
@@ -2125,6 +2158,7 @@ class RunManager:
                 "verification_status": eval_result["verification_status"],
                 "repository_health": eval_result["repository_health"],
                 "warnings": eval_result["warnings"],
+                "structural_suggestions": eval_result.get("structural_suggestions", []),
                 "notification": eval_result["notification"],
                 "verification_details": eval_result["verification_details"],
             }

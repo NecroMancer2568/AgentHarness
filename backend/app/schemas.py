@@ -32,6 +32,7 @@ class RunSummary(BaseModel):
     verification_status: str | None = None
     repository_health: str | None = None
     warnings: list[str] = Field(default_factory=list)
+    structural_suggestions: list[str] = Field(default_factory=list)
     notification: str | None = None
     created_at: str
     updated_at: str

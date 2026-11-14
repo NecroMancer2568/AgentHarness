@@ -1,7 +1,7 @@
 const API = import.meta.env.VITE_API_BASE_URL !== undefined
   ? import.meta.env.VITE_API_BASE_URL
   : (import.meta.env.DEV ? 'http://127.0.0.1:8000' : '')
-export type Run = {id:string; repository:string; task:string; status:string; created_at:string; updated_at:string; duration_ms:number|null; success:boolean|null; total_tokens:number; prompt_tokens:number; completion_tokens:number; llm_calls:number; error?:string|null; result?:any; metrics?:any; workspace_path?:string; events?:EventItem[]; final_status?:string|null; execution_status?:string|null; verification_status?:string|null; repository_health?:string|null; warnings?:string[]; notification?:string|null}
+export type Run = {id:string; repository:string; task:string; status:string; created_at:string; updated_at:string; duration_ms:number|null; success:boolean|null; total_tokens:number; prompt_tokens:number; completion_tokens:number; llm_calls:number; error?:string|null; result?:any; metrics?:any; workspace_path?:string; events?:EventItem[]; final_status?:string|null; execution_status?:string|null; verification_status?:string|null; repository_health?:string|null; warnings?:string[]; structural_suggestions?:string[]; notification?:string|null}
 export type EventItem = {id:number; run_id:string; timestamp:string; event_type:string; agent?:string|null; message:string; data:Record<string,any>}
 export type Repository = {name:string; path:string}
 async function request<T>(path:string, init?:RequestInit):Promise<T>{

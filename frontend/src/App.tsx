@@ -12,6 +12,7 @@ import {
   FolderPlus,
   GitBranch,
   HardDrive,
+  Info,
   Layers3,
   Play,
   Plus,
@@ -949,6 +950,7 @@ function LiveExecution({
   const result = run.result || {}
   const isActive = run.status === 'running' || run.status === 'queued'
   const warnings = run.warnings || result.warnings || []
+  const structuralSuggestions: string[] = run.structural_suggestions || result.structural_suggestions || []
   const notification = run.notification || result.notification
   const verificationDetails = result.verification_details || {}
   const checksPassed: string[] = verificationDetails.checks_passed || []
@@ -1041,6 +1043,29 @@ function LiveExecution({
               )}
             </div>
           )}
+        </div>
+      )}
+
+      {structuralSuggestions.length > 0 && run.status === 'succeeded' && (
+        <div
+          className="c"
+          style={{
+            border: '1px solid rgba(56, 189, 248, 0.4)',
+            background: 'rgba(56, 189, 248, 0.08)',
+            padding: '16px 22px',
+            marginBottom: 20,
+            borderRadius: 12,
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, color: '#38bdf8', fontWeight: 600, fontSize: 14 }}>
+            <Info size={18} />
+            <span>Repository Structure Recommendation</span>
+          </div>
+          <ul style={{ margin: '10px 0 0 24px', padding: 0, fontSize: 13, color: 'rgba(255,255,255,0.85)' }}>
+            {structuralSuggestions.map((s: string, idx: number) => (
+              <li key={idx} style={{ marginBottom: 4 }}>{s}</li>
+            ))}
+          </ul>
         </div>
       )}
 

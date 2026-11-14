@@ -434,7 +434,7 @@ class VerificationPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Original test suite passed (5 passed)", res["verification_details"]["checks_passed"])
 
     def test_status_scenario_2_missing_manifest_with_successful_inference(self):
-        """Scenario 2: Missing dependency manifest with successful dependency inference -> SUCCESS_WITH_WARNINGS."""
+        """Scenario 2: Missing dependency manifest with successful dependency inference -> SUCCESS with restructuring advice."""
         res = evaluate_final_status(
             dependency_status="DEPENDENCIES_READY",
             dependency_source="inferred",
@@ -445,13 +445,16 @@ class VerificationPipelineTests(unittest.IsolatedAsyncioTestCase):
             review_details={"approved": True, "review_state": "APPROVED"},
             inferred_packages=["fastapi", "uvicorn"],
         )
-        self.assertEqual(res["final_status"], "SUCCESS_WITH_WARNINGS")
+        self.assertEqual(res["final_status"], "SUCCESS")
         self.assertEqual(res["execution_status"], "COMPLETED")
+        self.assertEqual(res["verification_status"], "FULL_VERIFICATION")
         self.assertEqual(res["repository_health"], "MISSING_MANIFEST")
         self.assertTrue(res["success"])
-        self.assertEqual(res["db_status"], "success_with_warnings")
-        self.assertTrue(any("dependency manifest" in w.lower() for w in res["warnings"]))
+        self.assertEqual(res["db_status"], "succeeded")
+        self.assertEqual(res["warnings"], [])
+        self.assertTrue(any("dependency manifest" in s.lower() for s in res["structural_suggestions"]))
         self.assertIsNotNone(res["notification"])
+        self.assertTrue("suggestion" in res["notification"].lower() or "recommendation" in res["notification"].lower())
         self.assertIn("Inferred dependencies prepared (2 packages)", res["verification_details"]["checks_passed"])
 
     def test_status_scenario_3_missing_manifest_with_failed_inference(self):

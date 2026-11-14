@@ -234,6 +234,7 @@ def _serialize_run(row: dict, detail: bool = False):
         "verification_status": result_data.get("verification_status") or metrics_data.get("verification_status"),
         "repository_health": result_data.get("repository_health") or metrics_data.get("repository_health"),
         "warnings": result_data.get("warnings", metrics_data.get("warnings", [])),
+        "structural_suggestions": result_data.get("structural_suggestions", metrics_data.get("structural_suggestions", [])),
         "notification": result_data.get("notification") or metrics_data.get("notification"),
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
