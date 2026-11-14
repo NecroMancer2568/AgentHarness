@@ -172,9 +172,13 @@ def parse_reviewer_verdict(text: str) -> dict[str, Any]:
             }
 
     # Regex search for explicit VERDICT:
-    verdict_match = re.search(r"VERDICT:\s*(APPROVE|APPROVED|NEEDS_CHANGES|REJECT|REJECTED|PENDING|BLOCKED|INCONCLUSIVE)", text, re.IGNORECASE)
+    verdict_match = re.search(
+        r"(?:(?:final\s+)?verdict|\*\*verdict\*\*|###?\s*verdict)[:\s*]*(APPROVE|APPROVED|NEEDS_CHANGES|REJECT|REJECTED|PENDING|BLOCKED|INCONCLUSIVE)",
+        text,
+        re.IGNORECASE,
+    )
     rejection_reasons = []
-    reasons_block = re.search(r"REJECTION_REASONS:?\s*(.*?)(?:\n\n|\Z)", text, re.IGNORECASE | re.DOTALL)
+    reasons_block = re.search(r"(?:REJECTION_REASONS|REASONS|CONCERNS|ISSUES):?\s*(.*?)(?:\n\n|\Z)", text, re.IGNORECASE | re.DOTALL)
     if reasons_block:
         for line in reasons_block.group(1).splitlines():
             line = line.strip().lstrip("-* ").strip()
@@ -232,7 +236,10 @@ def parse_reviewer_verdict(text: str) -> dict[str, Any]:
         }
 
     # Fallback inspection of text sentiment
-    if "APPROVE" in text.upper() and "NEEDS_CHANGES" not in text.upper() and not rejection_reasons:
+    text_upper = text.upper()
+    has_approve = bool(re.search(r"\b(APPROVE|APPROVED|APPROVAL|LGTM)\b", text_upper))
+    has_needs_changes = bool(re.search(r"\b(NEEDS_CHANGES|REJECT|REJECTED)\b", text_upper))
+    if has_approve and not has_needs_changes and not rejection_reasons:
         return {
             "verdict": "APPROVE",
             "review_state": "APPROVED",
@@ -1346,12 +1353,12 @@ class RunManager:
             tracker.transition(WorkflowStage.RECORDING_BASELINE)
             if has_original_tests and dep_status == "DEPENDENCIES_READY":
                 baseline_record = await runtime.run_test_command(
-                    repo_test_info.get("recommended_command") or runtime._detect_test_command() or ["python", "-m", "pytest", "-q"],
+                    runtime._detect_test_command() or repo_test_info.get("recommended_command") or ["python", "-m", "pytest", "-q"],
                     timeout=min(self.settings.agentharness_test_timeout_seconds, 60, tracker.get_remaining_stage_budget())
                 )
             else:
                 baseline_record = {
-                    "command": repo_test_info.get("recommended_command") or ["python", "-m", "pytest", "-q"],
+                    "command": runtime._detect_test_command() or ["python", "-m", "pytest", "-q"],
                     "outcome": "NO_TESTS" if not has_original_tests else "BLOCKED",
                     "passed": False,
                     "metrics": {"collected": 0, "passed": 0, "failed": 0, "skipped": 0, "errors": 0},
@@ -1704,8 +1711,10 @@ class RunManager:
 
             # Detailed summaries for Reviewer
             base_m = baseline_record.get("metrics", {}) if baseline_tests else {}
+            base_cmd = baseline_record.get("command", [])
+            base_cmd_str = " ".join(base_cmd) if isinstance(base_cmd, list) else str(base_cmd)
             baseline_summary = (
-                f"Command: {' '.join(baseline_record.get('command', []))}\n"
+                f"Command: {base_cmd_str}\n"
                 f"Outcome: {baseline_record.get('outcome', 'NO_TESTS')}\n"
                 f"Collected: {base_m.get('collected', 0)}, Passed: {base_m.get('passed', 0)}, Failed: {base_m.get('failed', 0)}\n"
                 f"Failures: {', '.join(baseline_record.get('failure_details', [])) or 'None'}"

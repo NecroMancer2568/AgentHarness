@@ -19,6 +19,7 @@ ALLOWED_TEST_COMMANDS = {
     "auto": None,
     "pytest": ["python", "-m", "pytest", "-q"],
     "python -m pytest": ["python", "-m", "pytest", "-q"],
+    "python -m pytest -q": ["python", "-m", "pytest", "-q"],
     "pytest -q tests/test_is_even.py": ["python", "-m", "pytest", "-q", "tests/test_is_even.py"],
     "pytest -q tests/test_normalize_email.py": ["python", "-m", "pytest", "-q", "tests/test_normalize_email.py"],
     "pytest -q tests/test_safe_divide.py": ["python", "-m", "pytest", "-q", "tests/test_safe_divide.py"],
@@ -97,7 +98,8 @@ def resolve_test_command(command: str, workspace: Path) -> list[str] | None:
         return None
 
     # For scoped pytest commands specifying a file target (e.g. pytest -q tests/test_foo.py)
-    path_args = [t for t in tokens[1:] if not t.startswith("-") and not t.startswith("@")]
+    start_idx = 3 if tokens[:3] == ["python", "-m", "pytest"] else 1
+    path_args = [t for t in tokens[start_idx:] if not t.startswith("-") and not t.startswith("@")]
     if path_args:
         target = path_args[-1]
         target_path = (workspace / target).resolve()
@@ -1070,8 +1072,11 @@ class ToolRuntime:
             safe_env["VIRTUAL_ENV"] = os.environ["VIRTUAL_ENV"]
         return safe_env
 
-    def _resolve_executable(self, command: list[str]) -> list[str]:
-        exec_cmd = list(command)
+    def _resolve_executable(self, command: list[str] | str) -> list[str]:
+        if isinstance(command, str):
+            exec_cmd = shlex.split(command)
+        else:
+            exec_cmd = list(command)
         if not exec_cmd:
             return exec_cmd
         if self.venv_path and self.venv_path.is_dir():
@@ -1085,8 +1090,11 @@ class ToolRuntime:
             exec_cmd[0] = sys.executable or shutil.which("python3") or "python3"
         return exec_cmd
 
-    async def run_test_command(self, command: list[str], timeout: int) -> dict[str, Any]:
+    async def run_test_command(self, command: list[str] | str, timeout: int) -> dict[str, Any]:
         """Execute test command, capturing stdout/stderr separately with metrics and outcome analysis."""
+        if isinstance(command, str):
+            command = resolve_test_command(command, self.workspace) or shlex.split(command)
+
         dep_status = getattr(self, "dependency_status", "DEPENDENCIES_READY")
         if dep_status != "DEPENDENCIES_READY":
             err = f"Test execution prevented: dependency installation was not completed ({dep_status})."

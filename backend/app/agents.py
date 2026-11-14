@@ -62,12 +62,13 @@ ROLE_PROMPTS = {
   "code_reviewer": (
       "You are an independent code reviewer. Review the task, changes, and test evidence for correctness, regressions, security issues, and maintainability.\n"
       "MANDATORY REVIEW RULES:\n"
-      "1. Inspect the git diff using git_diff. If no changes were made, reject with NEEDS_CHANGES.\n"
+      "1. Inspect the git diff provided in the prompt context or using git_diff. If no changes were made, reject with NEEDS_CHANGES.\n"
       "2. If the task requires a bug fix or feature implementation, you MUST verify that production code files (e.g. in app/ or src/) were modified. If only test files or metadata files were modified, REJECT with NEEDS_CHANGES and state rejection reason: 'No production code changes were made; only test/metadata files were modified.'\n"
       "3. Verify that the git diff contains the actual modifications claimed in the implementation summary. If the summary claims a file was edited but the diff shows no changes to that file, REJECT with NEEDS_CHANGES.\n"
       "4. Inspect both production changes and generated tests. Verify test relevance and quality: ensure tests genuinely exercise the fix, test edge cases/boundary conditions, and do not make fabricated claims.\n"
       "5. Check that verification claims match actual execution results. If tests failed or were not collected, reject.\n"
-      "6. End your review with a structured JSON block:\n"
+      "6. The complete git diff, changed files list, and test execution results are already provided directly in your review prompt. Only call tools if you need to read additional unmodified files. Prioritize rendering your final verdict promptly within your allotted steps.\n"
+      "7. End your review with a structured JSON block:\n"
       "```json\n"
       "{\n"
       "  \"verdict\": \"APPROVE\" or \"NEEDS_CHANGES\",\n"
@@ -130,13 +131,24 @@ class AgentExecutor:
                 break
 
             # If on the final available step or tool budget reached, steer the agent to provide its final synthesis
-            is_final_step = ((step == max_steps - 1) or (role_tool_calls >= max_agent_tool_calls)) and (tools is not None) and (role_tool_calls > 0)
+            is_final_step = ((step == max_steps - 1) or (role_tool_calls >= max_agent_tool_calls)) and (tools is not None)
             current_tools = None if is_final_step else tools
             if is_final_step:
-                messages.append({
-                    "role": "user",
-                    "content": "You have gathered your evidence and reached the final step. Synthesize your findings and provide your complete final response now without calling further tools."
-                })
+                if role == "code_reviewer":
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "You have reached the final step. Do not call any tools. "
+                            "Output your final review verdict now with either:\n"
+                            "VERDICT: APPROVE\nor\nVERDICT: NEEDS_CHANGES\n"
+                            "followed by your summary and rejection reasons (if any)."
+                        )
+                    })
+                else:
+                    messages.append({
+                        "role": "user",
+                        "content": "You have reached your final step. Synthesize your findings and provide your complete final response now without calling further tools."
+                    })
 
             try:
                 result = await self.llm.chat(
@@ -179,7 +191,7 @@ class AgentExecutor:
                 final_text = content or latest_content or "Tool call budget reached."
                 break
 
-            if not current_tools and tool_calls:
+            if is_final_step or (not current_tools and tool_calls):
                 final_text = content or latest_content
                 break
 
