@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Activity,
   AlertTriangle,
@@ -9,7 +9,10 @@ import {
   Clock3,
   FileArchive,
   FileCode2,
+  Folder,
+  FolderCheck,
   FolderPlus,
+  FolderUp,
   GitBranch,
   HardDrive,
   Info,
@@ -21,9 +24,11 @@ import {
   Timer,
   Trash2,
   UploadCloud,
+  X,
   XCircle,
   Zap,
 } from 'lucide-react'
+import JSZip from 'jszip'
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import TopNav, { Page, WheelNav } from './components/Sidebar'
 import { Button, EmptyState, formatDuration, formatNumber, PageHeader, StatCard, StatusPill } from './components/Primitives'
@@ -1527,6 +1532,14 @@ function RepositoriesPage({
   const [zipFile, setZipFile] = useState<File | null>(null)
   const [zipName, setZipName] = useState('')
 
+  const [selectedFolderFiles, setSelectedFolderFiles] = useState<File[]>([])
+  const [folderInfo, setFolderInfo] = useState<{ name: string; fileCount: number; totalSize: number } | null>(null)
+  const [zipDragOver, setZipDragOver] = useState(false)
+  const [folderDragOver, setFolderDragOver] = useState(false)
+  const [showPathInput, setShowPathInput] = useState(false)
+  const folderInputRef = useRef<HTMLInputElement>(null)
+  const zipInputRef = useRef<HTMLInputElement>(null)
+
   const [folderPath, setFolderPath] = useState('')
   const [folderName, setFolderName] = useState('')
 
@@ -1580,6 +1593,89 @@ function RepositoriesPage({
       onRegistered()
     } catch (e: any) {
       setError(e.message)
+    } finally {
+      setBusy(false)
+      setBusyMsg('')
+    }
+  }
+
+  const processFolderFiles = (fileList: FileList | File[]) => {
+    const rawFiles = Array.from(fileList)
+    if (!rawFiles.length) return
+
+    const ignoredPatterns = [
+      '/.git/', '/node_modules/', '/__pycache__/', '/.venv/', '/.pytest_cache/', '/.DS_Store', 'Thumbs.db'
+    ]
+    const validFiles = rawFiles.filter((f) => {
+      const p = f.webkitRelativePath || f.name
+      return !ignoredPatterns.some((pat) => p.includes(pat) || p.endsWith(pat))
+    })
+
+    if (!validFiles.length) {
+      setError('Selected folder contains no project source files (all files were ignored or empty).')
+      return
+    }
+
+    const firstPath = validFiles[0].webkitRelativePath || validFiles[0].name
+    const detectedName = firstPath.split('/')[0] || 'uploaded-project'
+    const totalSize = validFiles.reduce((acc, f) => acc + f.size, 0)
+
+    setSelectedFolderFiles(validFiles)
+    setFolderInfo({
+      name: detectedName,
+      fileCount: validFiles.length,
+      totalSize,
+    })
+    if (!folderName.trim()) {
+      setFolderName(detectedName)
+    }
+    setError('')
+  }
+
+  const handleUploadFolder = async () => {
+    if (!selectedFolderFiles.length || !folderInfo) {
+      setError('Select a local folder to upload.')
+      return
+    }
+
+    setError('')
+    setSuccess('')
+    setBusy(true)
+    setBusyMsg('Preparing and packaging folder...')
+
+    try {
+      const zip = new JSZip()
+      const rootPrefix = folderInfo.name ? `${folderInfo.name}/` : ''
+
+      for (const file of selectedFolderFiles) {
+        let relPath = file.webkitRelativePath || file.name
+        if (rootPrefix && relPath.startsWith(rootPrefix)) {
+          relPath = relPath.slice(rootPrefix.length)
+        }
+        if (!relPath) continue
+        zip.file(relPath, file)
+      }
+
+      setBusyMsg(`Archiving ${selectedFolderFiles.length} files...`)
+      const zipBlob = await zip.generateAsync({
+        type: 'blob',
+        compression: 'DEFLATE',
+        compressionOptions: { level: 6 },
+      })
+
+      const targetName = folderName.trim() || folderInfo.name || 'imported-project'
+      const packagedZip = new File([zipBlob], `${targetName}.zip`, { type: 'application/zip' })
+
+      setBusyMsg('Uploading folder and creating Git baseline...')
+      const res = await api.uploadZip(packagedZip, targetName)
+
+      setSelectedFolderFiles([])
+      setFolderInfo(null)
+      setFolderName('')
+      setSuccess(`Repository '${res.repository.name}' uploaded and initialized successfully!`)
+      onRegistered()
+    } catch (e: any) {
+      setError(e.message || 'Failed to upload folder.')
     } finally {
       setBusy(false)
       setBusyMsg('')
@@ -1715,7 +1811,7 @@ function RepositoriesPage({
                 setError('')
               }}
             >
-              <FolderPlus size={13} /> Local folder
+              <FolderUp size={13} /> Upload folder
             </button>
           </div>
 
@@ -1757,33 +1853,90 @@ function RepositoriesPage({
           {tab === 'zip' && (
             <div>
               <label className="fl" style={{ marginTop: 0 }}>Select .zip project archive</label>
-              <label className="file-dropzone">
+              <div
+                className={`file-dropzone ${zipDragOver ? 'dragover' : ''} ${zipFile ? 'has-file' : ''}`}
+                onClick={() => zipInputRef.current?.click()}
+                onDragOver={(e) => {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  setZipDragOver(true)
+                }}
+                onDragLeave={(e) => {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  setZipDragOver(false)
+                }}
+                onDrop={(e) => {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  setZipDragOver(false)
+                  const f = e.dataTransfer.files?.[0]
+                  if (f) {
+                    if (!f.name.toLowerCase().endsWith('.zip')) {
+                      setError('Only .zip archive files are supported.')
+                      return
+                    }
+                    setZipFile(f)
+                    setError('')
+                    if (!zipName) {
+                      setZipName(f.name.replace(/\.zip$/i, ''))
+                    }
+                  }
+                }}
+              >
                 <input
+                  ref={zipInputRef}
                   type="file"
                   accept=".zip"
                   style={{ display: 'none' }}
                   onChange={(e) => {
                     if (e.target.files?.[0]) {
-                      setZipFile(e.target.files[0])
+                      const f = e.target.files[0]
+                      setZipFile(f)
                       setError('')
+                      if (!zipName) {
+                        setZipName(f.name.replace(/\.zip$/i, ''))
+                      }
                     }
                   }}
                   disabled={busy}
                 />
-                <div style={{ margin: '0 auto 8px' }}>
-                  <UploadCloud size={24} />
+                <div className="file-dropzone-icon">
+                  <FileArchive size={22} />
                 </div>
-                <strong>{zipFile ? 'Click to change file' : 'Click or drop .zip file here'}</strong>
-                <div className="sb" style={{ fontSize: 12, marginTop: 4 }}>Supports GitHub zip exports up to 250MB</div>
-              </label>
+                <div className="file-dropzone-title">
+                  {zipFile ? 'Click or drop to replace .zip file' : 'Click to choose or drop a .zip file'}
+                </div>
+                <div className="file-dropzone-sub">
+                  Supports GitHub export archives and project zips up to 250MB
+                </div>
+              </div>
 
               {zipFile && (
                 <div className="file-selected">
-                  <FileArchive size={16} />
-                  <strong>{zipFile.name}</strong>
-                  <span className="sb" style={{ marginLeft: 'auto' }}>
-                    {(zipFile.size / 1024 / 1024).toFixed(2)} MB
-                  </span>
+                  <div className="file-selected-icon">
+                    <FileArchive size={18} />
+                  </div>
+                  <div className="file-selected-details">
+                    <div className="file-selected-name" title={zipFile.name}>
+                      {zipFile.name}
+                    </div>
+                    <div className="file-selected-meta">
+                      {(zipFile.size / 1024 / 1024).toFixed(2)} MB · Ready to extract
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    className="file-selected-remove"
+                    title="Remove selected file"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      setZipFile(null)
+                    }}
+                    disabled={busy}
+                  >
+                    <X size={15} />
+                  </button>
                 </div>
               )}
 
@@ -1806,32 +1959,134 @@ function RepositoriesPage({
 
           {tab === 'folder' && (
             <div>
-              <label className="fl" style={{ marginTop: 0 }}>Local folder path</label>
-              <input
-                className="in"
-                value={folderPath}
-                onChange={(e) => setFolderPath(e.target.value)}
-                placeholder="/Users/username/projects/my-app"
-                disabled={busy}
-              />
-              <div className="sb" style={{ fontSize: 12, marginTop: 4 }}>
-                Any local directory. It will be copied and initialized with Git.
+              <label className="fl" style={{ marginTop: 0 }}>Select local folder</label>
+              <div
+                className={`file-dropzone ${folderDragOver ? 'dragover' : ''} ${folderInfo ? 'has-file' : ''}`}
+                onClick={() => folderInputRef.current?.click()}
+                onDragOver={(e) => {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  setFolderDragOver(true)
+                }}
+                onDragLeave={(e) => {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  setFolderDragOver(false)
+                }}
+                onDrop={(e) => {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  setFolderDragOver(false)
+                  if (e.dataTransfer.files?.length) {
+                    processFolderFiles(e.dataTransfer.files)
+                  }
+                }}
+              >
+                <input
+                  ref={folderInputRef}
+                  type="file"
+                  {...({ webkitdirectory: '', directory: '', multiple: true } as any)}
+                  style={{ display: 'none' }}
+                  onChange={(e) => {
+                    if (e.target.files?.length) {
+                      processFolderFiles(e.target.files)
+                    }
+                  }}
+                  disabled={busy}
+                />
+                <div className="file-dropzone-icon">
+                  <FolderUp size={22} />
+                </div>
+                <div className="file-dropzone-title">
+                  {folderInfo ? 'Click or drop to replace folder' : 'Click to choose or drop a local folder'}
+                </div>
+                <div className="file-dropzone-sub">
+                  Selects entire directory recursively · Automatically skips .git, node_modules & cache
+                </div>
               </div>
 
-              <label className="fl">Custom name (optional)</label>
+              {folderInfo && (
+                <div className="file-selected">
+                  <div className="file-selected-icon">
+                    <FolderCheck size={18} />
+                  </div>
+                  <div className="file-selected-details">
+                    <div className="file-selected-name" title={folderInfo.name}>
+                      {folderInfo.name}
+                    </div>
+                    <div className="file-selected-meta">
+                      {folderInfo.fileCount} files · {(folderInfo.totalSize / 1024 / 1024).toFixed(2)} MB · Ready to upload
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    className="file-selected-remove"
+                    title="Remove selected folder"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      setSelectedFolderFiles([])
+                      setFolderInfo(null)
+                    }}
+                    disabled={busy}
+                  >
+                    <X size={15} />
+                  </button>
+                </div>
+              )}
+
+              <label className="fl">Custom repository name (optional)</label>
               <input
                 className="in"
                 value={folderName}
                 onChange={(e) => setFolderName(e.target.value)}
-                placeholder="e.g. imported-app"
+                placeholder="e.g. my-imported-project"
                 disabled={busy}
               />
               {error && <div className="inline-error">{error}</div>}
               <div style={{ marginTop: 20 }}>
-                <Button onClick={handleImportFolder} disabled={busy || !folderPath.trim()}>
-                  {busy ? busyMsg || 'Importing...' : 'Import folder'} <ArrowRight size={15} />
+                <Button onClick={handleUploadFolder} disabled={busy || !folderInfo}>
+                  {busy ? busyMsg || 'Uploading...' : 'Upload folder'} <ArrowRight size={15} />
                 </Button>
               </div>
+
+              <div style={{ marginTop: 16, textAlign: 'center' }}>
+                <button
+                  type="button"
+                  style={{
+                    background: 'transparent',
+                    border: 0,
+                    color: 'rgba(255,255,255,0.45)',
+                    fontSize: 12,
+                    cursor: 'pointer',
+                    textDecoration: 'underline',
+                  }}
+                  onClick={() => setShowPathInput(!showPathInput)}
+                >
+                  {showPathInput ? 'Hide local path input' : 'Or import by local filesystem path'}
+                </button>
+              </div>
+
+              {showPathInput && (
+                <div style={{ marginTop: 14, padding: 14, background: 'rgba(255,255,255,0.03)', borderRadius: 12, border: '1px solid rgba(255,255,255,0.08)' }}>
+                  <label className="fl" style={{ marginTop: 0 }}>Absolute or relative folder path on disk</label>
+                  <input
+                    className="in"
+                    value={folderPath}
+                    onChange={(e) => setFolderPath(e.target.value)}
+                    placeholder="/Users/username/projects/my-app"
+                    disabled={busy}
+                  />
+                  <div style={{ marginTop: 10 }}>
+                    <button
+                      className="bt secondary sm"
+                      onClick={handleImportFolder}
+                      disabled={busy || !folderPath.trim()}
+                    >
+                      Import from path
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
