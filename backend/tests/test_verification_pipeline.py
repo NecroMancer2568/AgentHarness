@@ -750,6 +750,56 @@ class VerificationPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("checks_failed", deserialized["verification_details"])
         self.assertIn("checks_skipped", deserialized["verification_details"])
 
+    def test_status_scenario_15_production_fix_in_workspace_clears_stale_not_implemented(self):
+        """Scenario 15: Production fix in workspace prevents false rejection when implementation_status is stale."""
+        import tempfile
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmppath = Path(tmpdir)
+            subprocess.run(["git", "init"], cwd=tmppath, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=tmppath, check=True)
+            subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmppath, check=True)
+            (tmppath / "app").mkdir()
+            (tmppath / "app" / "service.py").write_text("def run(): pass\n")
+            subprocess.run(["git", "add", "."], cwd=tmppath, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=tmppath, check=True, capture_output=True)
+
+            # Modify production code
+            (tmppath / "app" / "service.py").write_text("def run(): return 42\n")
+
+            test_results = [{
+                "command": ["pytest"],
+                "exit_code": 0,
+                "duration_ms": 100,
+                "outcome": "PASS",
+                "stdout": "1 passed",
+                "stderr": "",
+                "metrics": {"collected": 1, "passed": 1, "failed": 0, "skipped": 0},
+            }]
+            reviewer_output = json.dumps({
+                "verdict": "APPROVE",
+                "summary": "Fix in app/service.py looks great and tests pass.",
+                "task_alignment": "Verified",
+                "test_evidence_verified": True,
+            })
+
+            # Pass implementation_status="NOT_IMPLEMENTED" to simulate coder not making changes, but test debugger did
+            v_state, t_pass, r_app, err, details = compute_verification_state(
+                tests=test_results,
+                reviewer_output=reviewer_output,
+                workspace=tmppath,
+                dependency_status="DEPENDENCIES_READY",
+                implementation_status="NOT_IMPLEMENTED",
+                has_original_tests=True,
+            )
+
+            self.assertTrue(t_pass)
+            self.assertTrue(r_app)
+            self.assertEqual(details["verdict"], "APPROVE")
+            self.assertEqual(details["review_state"], "APPROVED")
+            self.assertEqual(details["rejection_reasons"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

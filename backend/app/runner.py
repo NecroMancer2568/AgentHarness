@@ -877,9 +877,29 @@ def compute_verification_state(
     review_state = review_details.get("review_state", "REJECTED" if not review_approved else "APPROVED")
     rejection_reasons = review_details.get("rejection_reasons", [])
 
+    # Check actual changed files in workspace to avoid stale or erroneous implementation_status
+    actual_prod: list[str] = []
+    if workspace and (workspace / ".git").exists():
+        try:
+            import subprocess
+            res = subprocess.run(
+                ["git", "status", "--short"],
+                cwd=workspace,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if res.returncode == 0:
+                actual_changes = [line[3:].strip() for line in res.stdout.splitlines() if len(line) > 3]
+                actual_prod, _ = classify_changed_files(actual_changes)
+                if actual_prod:
+                    implementation_status = "IMPLEMENTED"
+        except Exception:
+            pass
+
     # If change-evidence validation detected that no production files were modified for an implementation task,
     # the task was not implemented and cannot pass verification.
-    if implementation_status == "NOT_IMPLEMENTED" and has_original_tests:
+    if implementation_status == "NOT_IMPLEMENTED" and has_original_tests and not actual_prod:
         review_approved = False
         review_state = "REJECTED"
         rejection_msg = "No production code changes were made; only test or metadata files were modified."
@@ -891,6 +911,19 @@ def compute_verification_state(
             "verdict": "NEEDS_CHANGES",
             "rejection_reasons": rejection_reasons,
         })
+    elif actual_prod or implementation_status == "IMPLEMENTED":
+        # Discard false "no production code changes" rejections if production files were actually modified
+        false_kw = ("no production code changes", "zero production files", "no production files were modified", "only test or metadata files")
+        rejection_reasons = [r for r in rejection_reasons if not any(kw in r.lower() for kw in false_kw)]
+        review_details["rejection_reasons"] = rejection_reasons
+        if not rejection_reasons and review_state == "REJECTED":
+            review_approved = True
+            review_state = "APPROVED"
+            review_details.update({
+                "approved": True,
+                "review_state": "APPROVED",
+                "verdict": "APPROVE",
+            })
 
     if not has_original_tests and (alternative_verification and alternative_verification.get("passed")):
         substantive = [
@@ -1670,6 +1703,18 @@ class RunManager:
             prod_files, test_meta_files = classify_changed_files(changed_files)
             test_files = [f for f in test_meta_files if any(ext in f for ext in (".py", ".js", ".ts", ".jsx", ".tsx")) and "test" in f.lower()]
             has_generated_tests = len(test_files) > 0 and not has_original_tests
+            if prod_files or not needs_prod:
+                if implementation_status == "NOT_IMPLEMENTED":
+                    self.event(
+                        run_id,
+                        "implementation_resolved_by_test_debug",
+                        f"Test & debug agent modified production code ({', '.join(prod_files)})",
+                        {"prod_files": prod_files},
+                        "test_debug_agent",
+                    )
+                implementation_status = "IMPLEMENTED"
+            else:
+                implementation_status = "NOT_IMPLEMENTED"
 
             # If repository had no tests and agents didn't create any, generate fallback regression test skeleton (at most once)
             if not has_original_tests and not test_files and prod_files and not test_generation_completed:
@@ -1707,6 +1752,10 @@ class RunManager:
             changed_files = await self._changed_files(workspace)
             prod_files, test_meta_files = classify_changed_files(changed_files)
             test_files = [f for f in test_meta_files if any(ext in f for ext in (".py", ".js", ".ts", ".jsx", ".tsx")) and "test" in f.lower()]
+            if prod_files or not needs_prod:
+                implementation_status = "IMPLEMENTED"
+            else:
+                implementation_status = "NOT_IMPLEMENTED"
 
             if prod_files and test_files:
                 temp_iso_dir = Path(tempfile.mkdtemp(prefix="agentharness_baseline_"))
