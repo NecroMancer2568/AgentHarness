@@ -510,6 +510,46 @@ class WorkflowTerminationTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("stage_heartbeat", events_emitted)
         self.assertNotIn("heartbeat", events_emitted)
 
+    def test_dependency_preparation_does_not_exhaust_agent_budget(self):
+        """Test 16: Dependency prep does not raise RunTimeoutError and resets deadline for agents."""
+        tracker = WorkflowTracker(
+            run_id="run-dep-timeout-test",
+            overall_timeout_seconds=5.0,
+            stage_timeout_seconds=2.0,
+            max_agent_handoffs=5,
+        )
+        tracker.transition(WorkflowStage.PREPARING_DEPENDENCIES)
+        # Simulate dependency download taking longer than initial 5s deadline
+        tracker.started_at = time.perf_counter() - 15.0
+        tracker.overall_deadline = tracker.started_at + 5.0
+
+        # In PREPARING_DEPENDENCIES, check_deadline should not raise
+        tracker.check_deadline()
+
+        # Transitioning out of PREPARING_DEPENDENCIES resets overall_deadline for agents
+        tracker.transition(WorkflowStage.RECORDING_BASELINE)
+        self.assertGreater(tracker.overall_deadline, time.perf_counter() + 4.0)
+        self.assertGreater(tracker.get_remaining_run_budget(), 4.0)
+
+    def test_nested_python_test_discovery(self):
+        """Test 17: Nested test files (e.g. backend/tests/test_resolution.py) correctly identify Python and pytest."""
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Path(tmp)
+            test_dir = ws / "backend" / "tests"
+            test_dir.mkdir(parents=True, exist_ok=True)
+            (test_dir / "test_resolution.py").write_text("def test_ok(): assert True\n", encoding="utf-8")
+
+            settings = Settings()
+            runtime = ToolRuntime(ws, settings, "auto", dependency_status="DEPENDENCIES_READY")
+            info = runtime.detect_repository_tests()
+
+            self.assertEqual(info["detected_language"], "python")
+            self.assertEqual(info["detected_framework"], "pytest")
+            self.assertTrue(info["has_existing_tests"])
+            self.assertEqual(info["test_count"], 1)
+            self.assertIn("backend/tests/test_resolution.py", info["existing_test_files"])
+            self.assertIn("python -m pytest", info["recommended_command"])
+
 
 if __name__ == "__main__":
     unittest.main()

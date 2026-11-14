@@ -873,12 +873,22 @@ class ToolRuntime:
                     if len(rel_parts) > 1:
                         test_dirs.add(str(Path(*rel_parts[:-1])))
 
-        has_python = bool(list(workspace.glob("*.py")) or list(workspace.glob("*/*.py")) or (workspace / "requirements.txt").exists() or (workspace / "pyproject.toml").exists())
-        has_js = (workspace / "package.json").exists()
-        has_rust = (workspace / "Cargo.toml").exists()
-        has_go = (workspace / "go.mod").exists()
-        has_java = (workspace / "pom.xml").exists() or (workspace / "build.gradle").exists() or (workspace / "build.gradle.kts").exists()
-        has_c = (workspace / "CMakeLists.txt").exists() or (workspace / "Makefile").exists()
+        has_python = bool(
+            any(f.endswith(".py") for f in test_files)
+            or list(workspace.glob("*.py"))
+            or list(workspace.glob("*/*.py"))
+            or (workspace / "requirements.txt").exists()
+            or (workspace / "pyproject.toml").exists()
+            or list(workspace.glob("requirements*.txt"))
+            or list(workspace.glob("*/requirements*.txt"))
+            or (self.dep_info.get("language") == "python")
+            or next(workspace.rglob("*.py"), None) is not None
+        )
+        has_js = (workspace / "package.json").exists() or (self.dep_info.get("language") == "javascript/typescript") or any(f.endswith((".js", ".ts", ".jsx", ".tsx")) for f in test_files)
+        has_rust = (workspace / "Cargo.toml").exists() or (self.dep_info.get("language") == "rust") or any(f.endswith(".rs") for f in test_files)
+        has_go = (workspace / "go.mod").exists() or (self.dep_info.get("language") == "go") or any(f.endswith(".go") for f in test_files)
+        has_java = (workspace / "pom.xml").exists() or (workspace / "build.gradle").exists() or (workspace / "build.gradle.kts").exists() or (self.dep_info.get("language") == "java") or any(f.endswith(".java") for f in test_files)
+        has_c = (workspace / "CMakeLists.txt").exists() or (workspace / "Makefile").exists() or (self.dep_info.get("language") == "c_cpp") or any(f.endswith((".c", ".cpp", ".cc")) for f in test_files)
 
         is_nonstandard = False
         if test_dirs:
@@ -1037,7 +1047,13 @@ class ToolRuntime:
         if (self.workspace / "Makefile").exists(): return ["make", "test"]
 
         # If python repository without tests, use python -m pytest -q so newly added tests or exit code 5 are executed
-        if list(self.workspace.glob("*.py")) or list(self.workspace.glob("*/*.py")) or (self.workspace / "requirements.txt").exists():
+        if (
+            list(self.workspace.glob("*.py"))
+            or list(self.workspace.glob("*/*.py"))
+            or (self.workspace / "requirements.txt").exists()
+            or next(self.workspace.rglob("*.py"), None) is not None
+            or self.dep_info.get("language") == "python"
+        ):
             return ["python", "-m", "pytest", "-q"]
 
         return None

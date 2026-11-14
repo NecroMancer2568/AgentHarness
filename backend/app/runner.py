@@ -1033,6 +1033,10 @@ class WorkflowTracker:
 
     def check_deadline(self) -> None:
         now = time.perf_counter()
+        if self.stage == WorkflowStage.PREPARING_DEPENDENCIES:
+            # Dependency preparation is governed by its dedicated dependency installation timeout budget.
+            # Do not cut off dependency preparation with the agent orchestration deadline.
+            return
         if now >= self.overall_deadline:
             elapsed = round((now - self.started_at) * 1000)
             raise RunTimeoutError(
@@ -1050,9 +1054,12 @@ class WorkflowTracker:
         return max(1.0, min(remaining_in_stage, remaining_run))
 
     def transition(self, new_stage: str, agent: str | None = None) -> None:
-        self.check_deadline()
         now = time.perf_counter()
         old_stage = self.stage
+        if old_stage == WorkflowStage.PREPARING_DEPENDENCIES and new_stage != WorkflowStage.PREPARING_DEPENDENCIES:
+            # Dependency preparation completed. Start the overall agent orchestration execution budget now!
+            self.overall_deadline = now + self.overall_timeout_seconds
+        self.check_deadline()
         duration_ms = round((now - self.stage_start_time) * 1000)
 
         self.stage_history.append({
@@ -1949,7 +1956,8 @@ class RunManager:
             eval_result = evaluate_final_status(
                 dependency_status=dep_status,
                 has_manifest=True,
-                has_original_tests=False,
+                has_original_tests=has_original_tests if 'has_original_tests' in locals() else False,
+                has_generated_tests=has_generated_tests if 'has_generated_tests' in locals() else False,
                 implementation_status="TIMED_OUT",
                 test_state="BLOCKED",
                 error_message=error_msg,
@@ -2008,7 +2016,8 @@ class RunManager:
             eval_result = evaluate_final_status(
                 dependency_status=dep_status,
                 has_manifest=True,
-                has_original_tests=False,
+                has_original_tests=has_original_tests if 'has_original_tests' in locals() else False,
+                has_generated_tests=has_generated_tests if 'has_generated_tests' in locals() else False,
                 implementation_status="FAILED",
                 test_state="BLOCKED",
                 error_message=error_msg,
