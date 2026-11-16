@@ -793,13 +793,37 @@ function RunEvaluation({
         eyebrow="New agent run"
         title="Run evaluation"
         description="Describe the change, set a budget, let six agents work in an isolated clone."
+        action={
+          <Button kind="secondary" onClick={() => onNavigate?.('repositories')}>
+            <FolderPlus size={15} /> Add a new repo
+          </Button>
+        }
       />
 
       <div className="gr c2">
         <div className="c">
-          <label className="fl" htmlFor="rp" style={{ marginTop: 0 }}>
-            Repository
-          </label>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 0, marginBottom: 4 }}>
+            <label className="fl" htmlFor="rp" style={{ margin: 0 }}>
+              Repository
+            </label>
+            <button
+              type="button"
+              className="bt secondary sm"
+              style={{
+                padding: '4px 10px',
+                fontSize: 12,
+                borderRadius: 8,
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 4,
+                cursor: 'pointer',
+              }}
+              onClick={() => onNavigate?.('repositories')}
+              title="Add a new repository or clone from GitHub"
+            >
+              <Plus size={13} /> Add a new repo
+            </button>
+          </div>
           <select
             id="rp"
             className="in"
@@ -813,18 +837,20 @@ function RunEvaluation({
               </option>
             ))}
           </select>
-          {repos.length === 0 && (
-            <div className="sb" style={{ marginTop: 8 }}>
-              No repositories found.{' '}
-              <button
-                type="button"
-                style={{ background: 'transparent', border: 0, color: '#fff', textDecoration: 'underline', cursor: 'pointer' }}
-                onClick={() => onNavigate?.('repositories')}
-              >
-                Add or clone a repository
-              </button>
-            </div>
-          )}
+          <div className="sb" style={{ marginTop: 8, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span>
+              {repos.length === 0
+                ? 'No repositories found.'
+                : `${repos.length} repositor${repos.length === 1 ? 'y' : 'ies'} registered.`}
+            </span>
+            <button
+              type="button"
+              style={{ background: 'transparent', border: 0, color: '#fff', textDecoration: 'underline', cursor: 'pointer', padding: 0 }}
+              onClick={() => onNavigate?.('repositories')}
+            >
+              + Add a new repo
+            </button>
+          </div>
 
           <label className="fl" htmlFor="tk">
             Engineering task
